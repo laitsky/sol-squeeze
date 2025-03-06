@@ -1,95 +1,63 @@
-import Image from "next/image";
-import styles from "./page.module.css";
+'use client'
+import dynamic from 'next/dynamic'
+
+import { useState, useEffect } from 'react'
+import { useWallet } from '@solana/wallet-adapter-react'
+import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
+import { Connection, PublicKey } from '@solana/web3.js'
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token'
+import { Box, VStack, Heading, Text, List, ListItem } from '@chakra-ui/react'
+
+interface Token {
+  mint: string
+  amount: number
+}
 
 export default function Home() {
+  const { publicKey, connected } = useWallet()
+  const [tokens, setTokens] = useState<Token[]>([])
+
+  useEffect(() => {
+    if (connected && publicKey) {
+      fetchTokens()
+    }
+  }, [connected, publicKey])
+
+  async function fetchTokens() {
+    const connection = new Connection('https://api.mainnet-beta.solana.com')
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+      publicKey as PublicKey,
+      {
+        programId: TOKEN_PROGRAM_ID,
+      }
+    )
+
+    const tokenList = tokenAccounts.value.map((accountInfo) => ({
+      mint: accountInfo.account.data.parsed.info.mint,
+      amount: accountInfo.account.data.parsed.info.tokenAmount.uiAmount,
+    }))
+
+    setTokens(tokenList)
+  }
+
   return (
-    <main className={styles.main}>
-      <div className={styles.description}>
-        <p>
-          Get started by editing&nbsp;
-          <code className={styles.code}>src/app/page.tsx</code>
-        </p>
-        <div>
-          <a
-            href="https://vercel.com?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            By{" "}
-            <Image
-              src="/vercel.svg"
-              alt="Vercel Logo"
-              className={styles.vercelLogo}
-              width={100}
-              height={24}
-              priority
-            />
-          </a>
-        </div>
-      </div>
-
-      <div className={styles.center}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js Logo"
-          width={180}
-          height={37}
-          priority
-        />
-      </div>
-
-      <div className={styles.grid}>
-        <a
-          href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Docs <span>-&gt;</span>
-          </h2>
-          <p>Find in-depth information about Next.js features and API.</p>
-        </a>
-
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Learn <span>-&gt;</span>
-          </h2>
-          <p>Learn about Next.js in an interactive course with&nbsp;quizzes!</p>
-        </a>
-
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Templates <span>-&gt;</span>
-          </h2>
-          <p>Explore starter templates for Next.js.</p>
-        </a>
-
-        <a
-          href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          className={styles.card}
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <h2>
-            Deploy <span>-&gt;</span>
-          </h2>
-          <p>
-            Instantly deploy your Next.js site to a shareable URL with Vercel.
-          </p>
-        </a>
-      </div>
-    </main>
-  );
+    <Box p={8}>
+      <VStack spacing={8} align="stretch">
+        <Heading>SPL Token List</Heading>
+        <WalletMultiButton />
+        {connected ? (
+          <List spacing={3}>
+            {tokens.map((token, index) => (
+              <ListItem key={index}>
+                <Text>Mint: {token.mint}</Text>
+                <Text>Amount: {token.amount}</Text>
+              </ListItem>
+            ))}
+          </List>
+        ) : (
+          <Text>Please connect your wallet to view your SPL tokens.</Text>
+        )}
+      </VStack>
+    </Box>
+  )
 }
