@@ -24,7 +24,7 @@ import {
 } from '@chakra-ui/react'
 import { FaWallet, FaCoins } from 'react-icons/fa'
 import Navbar from '../components/Navbar'
-import { fetchTokenMetadata, getTokenDisplayName, fetchTokenPrices, formatPrice } from '../lib/tokenService'
+import { fetchTokenMetadata, getTokenDisplayName, fetchTokenPrices, formatPrice, isTokenVerified, getVerificationLevel } from '../lib/tokenService'
 
 interface TokenMetadata {
   name: string;
@@ -32,6 +32,7 @@ interface TokenMetadata {
   decimals: number;
   logoURI?: string;
   address: string;
+  tags?: string[];
 }
 
 interface Token {
@@ -39,6 +40,7 @@ interface Token {
   amount: number
   metadata?: TokenMetadata | null
   price?: number | null
+  isVerified?: boolean
 }
 
 export default function Home() {
@@ -99,11 +101,33 @@ export default function Home() {
       // Fetch metadata for each token
       fetchedTokens.forEach(async (token, index) => {
         const metadata = await fetchTokenMetadata(token.mint);
-        setTokens(prevTokens => 
-          prevTokens.map((prevToken, prevIndex) => 
-            prevIndex === index ? { ...prevToken, metadata } : prevToken
-          )
-        );
+        const isVerified = isTokenVerified(metadata);
+        setTokens(prevTokens => {
+          const updatedTokens = prevTokens.map((prevToken, prevIndex) => 
+            prevIndex === index ? { ...prevToken, metadata, isVerified } : prevToken
+          );
+          // Sort tokens: strict > verified > community > unverified
+          return updatedTokens.sort((a, b) => {
+            const aLevel = getVerificationLevel(a.metadata);
+            const bLevel = getVerificationLevel(b.metadata);
+            
+            // Define sort priority: strict > verified > community > unverified
+            const priority = { strict: 1, verified: 2, community: 3, unverified: 4 };
+            
+            const aPriority = priority[aLevel];
+            const bPriority = priority[bLevel];
+            
+            // Sort by verification level first
+            if (aPriority !== bPriority) {
+              return aPriority - bPriority;
+            }
+            
+            // Then sort by name if both have same verification status
+            const aName = a.metadata?.name || a.mint;
+            const bName = b.metadata?.name || b.mint;
+            return aName.localeCompare(bName);
+          });
+        });
       });
 
       // Fetch prices for all tokens in batch
@@ -174,9 +198,28 @@ export default function Home() {
                       <CardBody>
                         <VStack align="start" spacing={4}>
                           <Flex justify="space-between" align="center" w="full">
-                            <Badge colorScheme="purple" fontSize="sm" px={3} py={1} borderRadius="full">
-                              Token #{index + 1}
-                            </Badge>
+                            <HStack spacing={2}>
+                              <Badge colorScheme="purple" fontSize="sm" px={3} py={1} borderRadius="full">
+                                Token #{index + 1}
+                              </Badge>
+                              {token.metadata && (
+                                <Badge 
+                                  colorScheme={
+                                    getVerificationLevel(token.metadata) === 'strict' ? 'green' :
+                                    getVerificationLevel(token.metadata) === 'verified' ? 'blue' :
+                                    getVerificationLevel(token.metadata) === 'community' ? 'orange' :
+                                    'gray'
+                                  }
+                                  fontSize="xs" 
+                                  px={2} 
+                                  py={1} 
+                                  borderRadius="full"
+                                  variant={getVerificationLevel(token.metadata) === 'unverified' ? 'outline' : 'solid'}
+                                >
+                                  {getVerificationLevel(token.metadata).toUpperCase()}
+                                </Badge>
+                              )}
+                            </HStack>
                             {token.price && (
                               <Text fontSize="sm" fontWeight="bold" color="green.600">
                                 {formatPrice(token.price)}
@@ -220,16 +263,17 @@ export default function Home() {
                               </Text>
                             </VStack>
                             
-                            {token.price && token.amount && (
-                              <VStack align="end" spacing={1}>
-                                <Text fontSize="sm" color="gray.500" fontWeight="medium">
-                                  Value (USDC)
-                                </Text>
-                                <Text fontSize="lg" fontWeight="bold" color="green.600">
-                                  {formatPrice(token.price * token.amount)}
-                                </Text>
-                              </VStack>
-                            )}
+                            <VStack align="end" spacing={1}>
+                              <Text fontSize="sm" color="gray.500" fontWeight="medium">
+                                Value (USDC)
+                              </Text>
+                              <Text fontSize="lg" fontWeight="bold" color="green.600">
+                                {(token.price && token.amount) ? 
+                                  formatPrice(token.price * token.amount) : 
+                                  'Loading...'
+                                }
+                              </Text>
+                            </VStack>
                           </Flex>
                         </VStack>
                       </CardBody>

@@ -5,6 +5,7 @@ interface TokenMetadata {
   logoURI?: string;
   address: string;
   price?: number; // USDC price
+  tags?: string[]; // Jupiter tags including verification status
 }
 
 interface TokenPrice {
@@ -43,7 +44,8 @@ export async function fetchTokenMetadata(mintAddress: string): Promise<TokenMeta
       symbol: data.symbol || 'UNKNOWN',
       decimals: data.decimals || 0,
       logoURI: data.logoURI,
-      address: mintAddress
+      address: mintAddress,
+      tags: data.tags || []
     };
 
     // Cache the result
@@ -124,4 +126,18 @@ export function formatPrice(price: number | null | undefined): string {
   } else {
     return `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
   }
+}
+
+export function isTokenVerified(metadata: TokenMetadata | null): boolean {
+  if (!metadata || !metadata.tags) return false;
+  return metadata.tags.includes('verified') || metadata.tags.includes('strict');
+}
+
+export function getVerificationLevel(metadata: TokenMetadata | null): 'verified' | 'strict' | 'community' | 'unverified' {
+  if (!metadata || !metadata.tags) return 'unverified';
+  
+  if (metadata.tags.includes('strict')) return 'strict';
+  if (metadata.tags.includes('verified')) return 'verified';
+  if (metadata.tags.includes('community')) return 'community';
+  return 'unverified';
 }
