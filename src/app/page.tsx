@@ -1,20 +1,57 @@
 'use client'
-import dynamic from 'next/dynamic'
-
 import { useState, useEffect } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { Connection, GetProgramAccountsFilter, PublicKey } from '@solana/web3.js'
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token'
-import { Box, VStack, Heading, Text, List, ListItem } from '@chakra-ui/react'
+import { 
+  Box, 
+  VStack, 
+  Heading, 
+  Text, 
+  Container, 
+  Card, 
+  CardBody, 
+  SimpleGrid, 
+  Badge, 
+  Flex, 
+  Spinner,
+  Center,
+  Icon,
+  Image,
+  Avatar,
+  HStack,
+  useColorModeValue
+} from '@chakra-ui/react'
+import { FaWallet, FaCoins } from 'react-icons/fa'
+import Navbar from '../components/Navbar'
+import { fetchTokenMetadata, getTokenDisplayName, fetchTokenPrices, formatPrice } from '../lib/tokenService'
+
+interface TokenMetadata {
+  name: string;
+  symbol: string;
+  decimals: number;
+  logoURI?: string;
+  address: string;
+}
 
 interface Token {
   mint: string
   amount: number
+  metadata?: TokenMetadata | null
+  price?: number | null
 }
 
 export default function Home() {
   const { publicKey, connected } = useWallet()
   const [tokens, setTokens] = useState<Token[]>([])
+  const [loading, setLoading] = useState(false)
+  
+  const bgGradient = useColorModeValue(
+    'linear(to-br, blue.50, purple.50)',
+    'linear(to-br, gray.900, purple.900)'
+  )
+  const cardBg = useColorModeValue('white', 'gray.800')
+  const borderColor = useColorModeValue('gray.200', 'gray.600')
 
   useEffect(() => {
     if (connected && publicKey) {
@@ -26,6 +63,7 @@ export default function Home() {
   }, [connected, publicKey])
 
   async function fetchTokens(publicKey: PublicKey) {
+    setLoading(true)
     const connection = new Connection(process.env.NEXT_PUBLIC_SOLANA_RPC_URL as string)
 
     const filters: GetProgramAccountsFilter[] = [
@@ -57,37 +95,177 @@ export default function Home() {
       });
 
       setTokens(fetchedTokens);
+
+      // Fetch metadata for each token
+      fetchedTokens.forEach(async (token, index) => {
+        const metadata = await fetchTokenMetadata(token.mint);
+        setTokens(prevTokens => 
+          prevTokens.map((prevToken, prevIndex) => 
+            prevIndex === index ? { ...prevToken, metadata } : prevToken
+          )
+        );
+      });
+
+      // Fetch prices for all tokens in batch
+      const mintAddresses = fetchedTokens.map(token => token.mint);
+      const pricesMap = await fetchTokenPrices(mintAddresses);
+      
+      setTokens(prevTokens => 
+        prevTokens.map(token => ({
+          ...token,
+          price: pricesMap.get(token.mint) || null
+        }))
+      );
     } catch (error) {
         console.error('Error fetching tokens:', error);
+    } finally {
+      setLoading(false)
     }
   }
 
-  const WalletMultiButtonDynamic = dynamic(
-    () => import('@solana/wallet-adapter-react-ui').then((mod) => mod.WalletMultiButton),
-    {
-      ssr: false,
-      loading: () => <div className="wallet-loader">Loading wallet...</div>
-    }
-  )
-
   return (
-    <Box p={8}>
-      <VStack spacing={8} align="stretch">
-        <Heading>SPL Token List</Heading>
-        <WalletMultiButtonDynamic />
-        {connected ? (
-          <List spacing={3}>
-            {tokens.map((token, index) => (
-              <ListItem key={index}>
-                <Text>Mint: {token.mint}</Text>
-                <Text>Amount: {token.amount}</Text>
-              </ListItem>
-            ))}
-          </List>
-        ) : (
-          <Text>Please connect your wallet to view your SPL tokens.</Text>
-        )}
-      </VStack>
+    <>
+      <Navbar />
+      <Box minH="100vh" bgGradient={bgGradient}>
+        <Container maxW="6xl" py={12}>
+          <VStack spacing={10} align="stretch">
+            <VStack spacing={4} textAlign="center">
+              <Icon as={FaCoins} boxSize={12} color="purple.500" />
+              <Heading size="2xl" bgGradient="linear(to-r, purple.600, blue.600)" bgClip="text">
+                SOL Token Vacuum
+              </Heading>
+              <Text fontSize="lg" color="gray.600" maxW="2xl">
+                Insert subhero text here 
+              </Text>
+            </VStack>
+
+          {connected ? (
+            <VStack spacing={6}>
+              <Flex align="center" gap={3}>
+                <Icon as={FaCoins} color="purple.500" />
+                <Heading size="lg">Your Token Portfolio</Heading>
+                {loading && <Spinner color="purple.500" />}
+              </Flex>
+              
+              {loading ? (
+                <Center py={12}>
+                  <VStack spacing={4}>
+                    <Spinner size="xl" color="purple.500" thickness="4px" />
+                    <Text color="gray.600">Loading your tokens...</Text>
+                  </VStack>
+                </Center>
+              ) : tokens.length > 0 ? (
+                <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={6} w="full">
+                  {tokens.map((token, index) => (
+                    <Card 
+                      key={index} 
+                      bg={cardBg} 
+                      shadow="lg" 
+                      borderRadius="xl"
+                      border="1px"
+                      borderColor={borderColor}
+                      _hover={{ 
+                        transform: 'translateY(-4px)', 
+                        shadow: '2xl',
+                        borderColor: 'purple.300' 
+                      }}
+                      transition="all 0.3s"
+                    >
+                      <CardBody>
+                        <VStack align="start" spacing={4}>
+                          <Flex justify="space-between" align="center" w="full">
+                            <Badge colorScheme="purple" fontSize="sm" px={3} py={1} borderRadius="full">
+                              Token #{index + 1}
+                            </Badge>
+                            {token.price && (
+                              <Text fontSize="sm" fontWeight="bold" color="green.600">
+                                {formatPrice(token.price)}
+                              </Text>
+                            )}
+                          </Flex>
+                          
+                          <HStack spacing={3} w="full">
+                            <Avatar
+                              size="md"
+                              src={token.metadata?.logoURI}
+                              name={token.metadata?.symbol || 'Token'}
+                              bg="purple.100"
+                              color="purple.600"
+                            />
+                            <VStack align="start" spacing={1} flex={1}>
+                              <Text fontSize="md" fontWeight="semibold" color="gray.800">
+                                {token.metadata ? 
+                                  getTokenDisplayName(token.mint, token.metadata) : 
+                                  'Loading...'
+                                }
+                              </Text>
+                              <Text 
+                                fontSize="xs" 
+                                fontFamily="mono" 
+                                color="gray.500"
+                                wordBreak="break-all"
+                              >
+                                {token.mint}
+                              </Text>
+                            </VStack>
+                          </HStack>
+                          
+                          <Flex justify="space-between" align="center" w="full">
+                            <VStack align="start" spacing={1}>
+                              <Text fontSize="sm" color="gray.500" fontWeight="medium">
+                                Balance
+                              </Text>
+                              <Text fontSize="xl" fontWeight="bold" color="purple.600">
+                                {token.amount?.toLocaleString() || '0'}
+                              </Text>
+                            </VStack>
+                            
+                            {token.price && token.amount && (
+                              <VStack align="end" spacing={1}>
+                                <Text fontSize="sm" color="gray.500" fontWeight="medium">
+                                  Value (USDC)
+                                </Text>
+                                <Text fontSize="lg" fontWeight="bold" color="green.600">
+                                  {formatPrice(token.price * token.amount)}
+                                </Text>
+                              </VStack>
+                            )}
+                          </Flex>
+                        </VStack>
+                      </CardBody>
+                    </Card>
+                  ))}
+                </SimpleGrid>
+              ) : (
+                <Center py={12}>
+                  <VStack spacing={4} textAlign="center">
+                    <Icon as={FaCoins} boxSize={12} color="gray.400" />
+                    <Text fontSize="lg" color="gray.500">
+                      No tokens found in your wallet
+                    </Text>
+                    <Text color="gray.400">
+                      Your SPL tokens will appear here once detected
+                    </Text>
+                  </VStack>
+                </Center>
+              )}
+            </VStack>
+          ) : (
+            <Center py={12}>
+              <VStack spacing={4} textAlign="center">
+                <Icon as={FaWallet} boxSize={12} color="gray.400" />
+                <Text fontSize="lg" color="gray.500">
+                  Connect your wallet to get started
+                </Text>
+                <Text color="gray.400">
+                  View and manage your SPL tokens with ease
+                </Text>
+              </VStack>
+            </Center>
+          )}
+        </VStack>
+      </Container>
     </Box>
+    </>
   )
 }
