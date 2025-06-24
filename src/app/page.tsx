@@ -41,6 +41,7 @@ interface Token {
   metadata?: TokenMetadata | null
   price?: number | null
   isVerified?: boolean
+  priceFetched?: boolean
 }
 
 export default function Home() {
@@ -108,21 +109,23 @@ export default function Home() {
           );
           // Sort tokens: strict > verified > community > unverified
           return updatedTokens.sort((a, b) => {
-            const aLevel = getVerificationLevel(a.metadata);
-            const bLevel = getVerificationLevel(b.metadata);
+            // Get verification level for both tokens
+            const aLevel = getVerificationLevel(a.metadata || null);
+            const bLevel = getVerificationLevel(b.metadata || null);
             
-            // Define sort priority: strict > verified > community > unverified
-            const priority = { strict: 1, verified: 2, community: 3, unverified: 4 };
+            // Define sort priority: strict > verified > community > unverified (lower number = higher priority)
+            const priority: Record<string, number> = { strict: 1, verified: 2, community: 3, unverified: 4 };
             
-            const aPriority = priority[aLevel];
-            const bPriority = priority[bLevel];
+            // Get priority values with fallback to unverified (4) if not found
+            const aPriority = priority[aLevel] ?? 4;
+            const bPriority = priority[bLevel] ?? 4;
             
-            // Sort by verification level first
+            // Sort by verification level first (primary sort)
             if (aPriority !== bPriority) {
               return aPriority - bPriority;
             }
             
-            // Then sort by name if both have same verification status
+            // If same verification level, sort alphabetically by name (secondary sort)
             const aName = a.metadata?.name || a.mint;
             const bName = b.metadata?.name || b.mint;
             return aName.localeCompare(bName);
@@ -137,7 +140,9 @@ export default function Home() {
       setTokens(prevTokens => 
         prevTokens.map(token => ({
           ...token,
-          price: pricesMap.get(token.mint) || null
+          price: pricesMap.get(token.mint) || null,
+          // Mark as price fetched (even if null) to stop showing "Loading..."
+          priceFetched: true
         }))
       );
     } catch (error) {
@@ -270,7 +275,7 @@ export default function Home() {
                               <Text fontSize="lg" fontWeight="bold" color="green.600">
                                 {(token.price && token.amount) ? 
                                   formatPrice(token.price * token.amount) : 
-                                  'Loading...'
+                                  token.priceFetched ? 'N/A' : 'Loading...'
                                 }
                               </Text>
                             </VStack>
