@@ -3,26 +3,10 @@ import { useState, useEffect } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { Connection, GetProgramAccountsFilter, PublicKey } from '@solana/web3.js'
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token'
-import { 
-  Box, 
-  VStack, 
-  Heading, 
-  Text, 
-  Container, 
-  Card, 
-  CardBody, 
-  SimpleGrid, 
-  Badge, 
-  Flex, 
-  Spinner,
-  Center,
-  Icon,
-  Image,
-  Avatar,
-  HStack,
-  useColorModeValue
-} from '@chakra-ui/react'
-import { FaWallet, FaCoins } from 'react-icons/fa'
+import { Wallet, Coins, Loader2 } from 'lucide-react'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import Navbar from '../components/Navbar'
 import { fetchTokenMetadata, getTokenDisplayName, fetchTokenPrices, formatPrice, isTokenVerified, getVerificationLevel } from '../lib/tokenService'
 
@@ -48,13 +32,6 @@ export default function Home() {
   const { publicKey, connected } = useWallet()
   const [tokens, setTokens] = useState<Token[]>([])
   const [loading, setLoading] = useState(false)
-  
-  const bgGradient = useColorModeValue(
-    'linear(to-br, blue.50, purple.50)',
-    'linear(to-br, gray.900, purple.900)'
-  )
-  const cardBg = useColorModeValue('white', 'gray.800')
-  const borderColor = useColorModeValue('gray.200', 'gray.600')
 
   useEffect(() => {
     if (connected && publicKey) {
@@ -158,166 +135,145 @@ export default function Home() {
   return (
     <>
       <Navbar />
-      <Box minH="100vh" bgGradient={bgGradient}>
-        <Container maxW="6xl" py={12}>
-          <VStack spacing={10} align="stretch">
-            <VStack spacing={4} textAlign="center">
-              <Icon as={FaCoins} boxSize={12} color="purple.500" />
-              <Heading size="2xl" bgGradient="linear(to-r, purple.600, blue.600)" bgClip="text">
+      <main className="min-h-screen bg-gradient-to-br from-background via-background to-slate-900">
+        <div className="container max-w-6xl mx-auto px-4 py-12">
+          <div className="space-y-10">
+            {/* Hero Section */}
+            <div className="text-center space-y-4">
+              <div className="flex justify-center mb-6">
+                <div className="p-4 rounded-full bg-primary/10 border border-primary/20">
+                  <Coins className="h-12 w-12 text-primary" />
+                </div>
+              </div>
+              <h1 className="text-4xl md:text-6xl font-bold bg-gradient-to-r from-primary via-purple-300 to-blue-300 bg-clip-text text-transparent">
                 SOL Token Vacuum
-              </Heading>
-              <Text fontSize="lg" color="gray.600" maxW="2xl">
-                Insert subhero text here 
-              </Text>
-            </VStack>
+              </h1>
+              <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
+                Discover and manage your Solana token portfolio with style and elegance
+              </p>
+            </div>
 
-          {connected ? (
-            <VStack spacing={6}>
-              <Flex align="center" gap={3}>
-                <Icon as={FaCoins} color="purple.500" />
-                <Heading size="lg">Your Token Portfolio</Heading>
-                {loading && <Spinner color="purple.500" />}
-              </Flex>
-              
-              {loading ? (
-                <Center py={12}>
-                  <VStack spacing={4}>
-                    <Spinner size="xl" color="purple.500" thickness="4px" />
-                    <Text color="gray.600">Loading your tokens...</Text>
-                  </VStack>
-                </Center>
-              ) : tokens.length > 0 ? (
-                <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={6} w="full">
-                  {tokens.map((token, index) => (
-                    <Card 
-                      key={index} 
-                      bg={cardBg} 
-                      shadow="lg" 
-                      borderRadius="xl"
-                      border="1px"
-                      borderColor={borderColor}
-                      _hover={{ 
-                        transform: 'translateY(-4px)', 
-                        shadow: '2xl',
-                        borderColor: 'purple.300' 
-                      }}
-                      transition="all 0.3s"
-                    >
-                      <CardBody>
-                        <VStack align="start" spacing={4}>
-                          <Flex justify="space-between" align="center" w="full">
-                            <HStack spacing={2}>
-                              <Badge colorScheme="purple" fontSize="sm" px={3} py={1} borderRadius="full">
+            {connected ? (
+              <div className="space-y-8">
+                <div className="flex items-center justify-center gap-3">
+                  <Coins className="h-6 w-6 text-primary" />
+                  <h2 className="text-2xl font-semibold">Your Token Portfolio</h2>
+                  {loading && <Loader2 className="h-5 w-5 text-primary animate-spin" />}
+                </div>
+                
+                {loading ? (
+                  <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                    <Loader2 className="h-12 w-12 text-primary animate-spin" />
+                    <p className="text-muted-foreground">Loading your tokens...</p>
+                  </div>
+                ) : tokens.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {tokens.map((token, index) => (
+                      <Card 
+                        key={index} 
+                        className="group hover:scale-105 transition-all duration-300 border-border/50 bg-card/50 backdrop-blur-sm hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5"
+                      >
+                        <CardHeader className="pb-3">
+                          <div className="flex justify-between items-start">
+                            <div className="flex gap-2 flex-wrap">
+                              <Badge variant="default" className="bg-primary/10 text-primary border-primary/20">
                                 Token #{index + 1}
                               </Badge>
                               {token.metadata && (
                                 <Badge 
-                                  colorScheme={
-                                    getVerificationLevel(token.metadata) === 'strict' ? 'green' :
-                                    getVerificationLevel(token.metadata) === 'verified' ? 'blue' :
-                                    getVerificationLevel(token.metadata) === 'community' ? 'orange' :
-                                    'gray'
+                                  variant={
+                                    getVerificationLevel(token.metadata) === 'strict' ? 'success' :
+                                    getVerificationLevel(token.metadata) === 'verified' ? 'info' :
+                                    getVerificationLevel(token.metadata) === 'community' ? 'warning' :
+                                    'outline'
                                   }
-                                  fontSize="xs" 
-                                  px={2} 
-                                  py={1} 
-                                  borderRadius="full"
-                                  variant={getVerificationLevel(token.metadata) === 'unverified' ? 'outline' : 'solid'}
+                                  className="text-xs"
                                 >
                                   {getVerificationLevel(token.metadata).toUpperCase()}
                                 </Badge>
                               )}
-                            </HStack>
+                            </div>
                             {token.price && (
-                              <Text fontSize="sm" fontWeight="bold" color="green.600">
+                              <span className="text-sm font-bold text-emerald-300">
                                 {formatPrice(token.price)}
-                              </Text>
+                              </span>
                             )}
-                          </Flex>
-                          
-                          <HStack spacing={3} w="full">
-                            <Avatar
-                              size="md"
-                              src={token.metadata?.logoURI}
-                              name={token.metadata?.symbol || 'Token'}
-                              bg="purple.100"
-                              color="purple.600"
-                            />
-                            <VStack align="start" spacing={1} flex={1}>
-                              <Text fontSize="md" fontWeight="semibold" color="gray.800">
+                          </div>
+                        </CardHeader>
+                        
+                        <CardContent className="space-y-4">
+                          <div className="flex items-center space-x-3">
+                            <Avatar className="h-12 w-12 border-2 border-primary/20">
+                              <AvatarImage src={token.metadata?.logoURI} />
+                              <AvatarFallback className="bg-primary/10 text-primary font-bold">
+                                {token.metadata?.symbol?.charAt(0) || 'T'}
+                              </AvatarFallback>
+                            </Avatar>
+                            <div className="flex-1 min-w-0">
+                              <h3 className="font-semibold truncate">
                                 {token.metadata ? 
                                   getTokenDisplayName(token.mint, token.metadata) : 
                                   'Loading...'
                                 }
-                              </Text>
-                              <Text 
-                                fontSize="xs" 
-                                fontFamily="mono" 
-                                color="gray.500"
-                                wordBreak="break-all"
-                              >
+                              </h3>
+                              <p className="text-xs font-mono text-muted-foreground truncate">
                                 {token.mint}
-                              </Text>
-                            </VStack>
-                          </HStack>
+                              </p>
+                            </div>
+                          </div>
                           
-                          <Flex justify="space-between" align="center" w="full">
-                            <VStack align="start" spacing={1}>
-                              <Text fontSize="sm" color="gray.500" fontWeight="medium">
-                                Balance
-                              </Text>
-                              <Text fontSize="xl" fontWeight="bold" color="purple.600">
+                          <div className="flex justify-between items-center pt-4 border-t border-border/50">
+                            <div>
+                              <p className="text-sm text-muted-foreground">Balance</p>
+                              <p className="text-xl font-bold text-primary">
                                 {token.amount?.toLocaleString() || '0'}
-                              </Text>
-                            </VStack>
+                              </p>
+                            </div>
                             
-                            <VStack align="end" spacing={1}>
-                              <Text fontSize="sm" color="gray.500" fontWeight="medium">
-                                Value (USDC)
-                              </Text>
-                              <Text fontSize="lg" fontWeight="bold" color="green.600">
+                            <div className="text-right">
+                              <p className="text-sm text-muted-foreground">Value (USDC)</p>
+                              <p className="text-lg font-bold text-emerald-300">
                                 {(token.price && token.amount) ? 
                                   formatPrice(token.price * token.amount) : 
                                   token.priceFetched ? 'N/A' : 'Loading...'
                                 }
-                              </Text>
-                            </VStack>
-                          </Flex>
-                        </VStack>
-                      </CardBody>
-                    </Card>
-                  ))}
-                </SimpleGrid>
-              ) : (
-                <Center py={12}>
-                  <VStack spacing={4} textAlign="center">
-                    <Icon as={FaCoins} boxSize={12} color="gray.400" />
-                    <Text fontSize="lg" color="gray.500">
+                              </p>
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-20 space-y-4 text-center">
+                    <div className="p-4 rounded-full bg-muted/20 border border-border/50">
+                      <Coins className="h-12 w-12 text-muted-foreground" />
+                    </div>
+                    <h3 className="text-lg font-semibold text-muted-foreground">
                       No tokens found in your wallet
-                    </Text>
-                    <Text color="gray.400">
+                    </h3>
+                    <p className="text-muted-foreground">
                       Your SPL tokens will appear here once detected
-                    </Text>
-                  </VStack>
-                </Center>
-              )}
-            </VStack>
-          ) : (
-            <Center py={12}>
-              <VStack spacing={4} textAlign="center">
-                <Icon as={FaWallet} boxSize={12} color="gray.400" />
-                <Text fontSize="lg" color="gray.500">
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4 text-center">
+                <div className="p-4 rounded-full bg-muted/20 border border-border/50">
+                  <Wallet className="h-12 w-12 text-muted-foreground" />
+                </div>
+                <h3 className="text-lg font-semibold text-muted-foreground">
                   Connect your wallet to get started
-                </Text>
-                <Text color="gray.400">
-                  View and manage your SPL tokens with ease
-                </Text>
-              </VStack>
-            </Center>
-          )}
-        </VStack>
-      </Container>
-    </Box>
+                </h3>
+                <p className="text-muted-foreground">
+                  View and manage your SPL tokens with style and elegance
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      </main>
     </>
   )
 }

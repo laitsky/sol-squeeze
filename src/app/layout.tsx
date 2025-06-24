@@ -6,8 +6,8 @@ import { Providers } from "./providers";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: 'SPL Token List',
-  description: 'View your SPL tokens',
+  title: 'Sol Vacuum - Solana Token Portfolio',
+  description: 'Discover and manage your Solana token portfolio with style and elegance',
 };
 
 export default function RootLayout({
@@ -16,7 +16,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" className="dark">
       <body className={inter.className}>
         <Providers>
           {children}
