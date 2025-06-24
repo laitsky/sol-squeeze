@@ -89,25 +89,43 @@ export default function Home() {
           const updatedTokens = prevTokens.map((prevToken) => 
             prevToken.mint === token.mint ? { ...prevToken, metadata, isVerified } : prevToken
           );
-          // Sort tokens: strict > verified > community > unverified
+          // Sort tokens: verification status first, then by USDC value/amount
           return updatedTokens.sort((a, b) => {
             // Get verification level for both tokens
             const aLevel = getVerificationLevel(a.metadata || null);
             const bLevel = getVerificationLevel(b.metadata || null);
             
-            // Define sort priority: strict > verified > community > unverified (lower number = higher priority)
-            const priority: Record<string, number> = { strict: 1, verified: 2, community: 3, unverified: 4 };
+            // Define verification priority: strict > verified > community > unverified (lower number = higher priority)
+            const verificationPriority: Record<string, number> = { strict: 1, verified: 2, community: 3, unverified: 4 };
             
             // Get priority values with fallback to unverified (4) if not found
-            const aPriority = priority[aLevel] ?? 4;
-            const bPriority = priority[bLevel] ?? 4;
+            const aPriority = verificationPriority[aLevel] ?? 4;
+            const bPriority = verificationPriority[bLevel] ?? 4;
             
-            // Sort by verification level first (primary sort)
+            // Primary sort: by verification level first
             if (aPriority !== bPriority) {
               return aPriority - bPriority;
             }
             
-            // If same verification level, sort by amount (highest to lowest) as secondary sort
+            // Secondary sort: within same verification level, sort by USDC value/amount
+            // Calculate USDC values
+            const aUsdcValue = (a.price && a.amount) ? a.price * a.amount : null;
+            const bUsdcValue = (b.price && b.amount) ? b.price * b.amount : null;
+            
+            // If both have USDC value, sort by highest value first
+            if (aUsdcValue !== null && bUsdcValue !== null) {
+              return bUsdcValue - aUsdcValue;
+            }
+            
+            // Tokens with USDC value come before those without
+            if (aUsdcValue !== null && bUsdcValue === null) {
+              return -1;
+            }
+            if (aUsdcValue === null && bUsdcValue !== null) {
+              return 1;
+            }
+            
+            // Finally, sort by token amount (highest first) for tokens without USDC value
             return (b.amount || 0) - (a.amount || 0);
           });
         });
@@ -117,14 +135,54 @@ export default function Home() {
       const mintAddresses = fetchedTokens.map(token => token.mint);
       const pricesMap = await fetchTokenPrices(mintAddresses);
       
-      setTokens(prevTokens => 
-        prevTokens.map(token => ({
+      setTokens(prevTokens => {
+        const updatedTokens = prevTokens.map(token => ({
           ...token,
           price: pricesMap.get(token.mint) || null,
           // Mark as price fetched (even if null) to stop showing "Loading..."
           priceFetched: true
-        }))
-      );
+        }));
+        
+        // Re-sort after prices are fetched to maintain verification + value ordering
+        return updatedTokens.sort((a, b) => {
+          // Get verification level for both tokens
+          const aLevel = getVerificationLevel(a.metadata || null);
+          const bLevel = getVerificationLevel(b.metadata || null);
+          
+          // Define verification priority: strict > verified > community > unverified (lower number = higher priority)
+          const verificationPriority: Record<string, number> = { strict: 1, verified: 2, community: 3, unverified: 4 };
+          
+          // Get priority values with fallback to unverified (4) if not found
+          const aPriority = verificationPriority[aLevel] ?? 4;
+          const bPriority = verificationPriority[bLevel] ?? 4;
+          
+          // Primary sort: by verification level first
+          if (aPriority !== bPriority) {
+            return aPriority - bPriority;
+          }
+          
+          // Secondary sort: within same verification level, sort by USDC value/amount
+          // Calculate USDC values
+          const aUsdcValue = (a.price && a.amount) ? a.price * a.amount : null;
+          const bUsdcValue = (b.price && b.amount) ? b.price * b.amount : null;
+          
+          // If both have USDC value, sort by highest value first
+          if (aUsdcValue !== null && bUsdcValue !== null) {
+            return bUsdcValue - aUsdcValue;
+          }
+          
+          // Tokens with USDC value come before those without
+          if (aUsdcValue !== null && bUsdcValue === null) {
+            return -1;
+          }
+          if (aUsdcValue === null && bUsdcValue !== null) {
+            return 1;
+          }
+          
+          // Finally, sort by token amount (highest first) for tokens without USDC value
+          return (b.amount || 0) - (a.amount || 0);
+        });
+      });
     } catch (error) {
         console.error('Error fetching tokens:', error);
     } finally {

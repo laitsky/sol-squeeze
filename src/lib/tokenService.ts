@@ -140,12 +140,13 @@ export function getTokenDisplayName(mintAddress: string, metadata: TokenMetadata
 export function formatPrice(price: number | null | undefined): string {
   if (!price || price === 0) return 'N/A';
   
-  if (price < 0.0001) {
-    return `$${price.toExponential(2)}`;
+  // For very small values (less than $0.01), show "<$0.01"
+  if (price < 0.01) {
+    return '<$0.01';
   } else if (price < 1) {
-    return `$${price.toFixed(6)}`;
-  } else if (price < 1000) {
     return `$${price.toFixed(4)}`;
+  } else if (price < 1000) {
+    return `$${price.toFixed(2)}`;
   } else {
     return `$${price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
   }
