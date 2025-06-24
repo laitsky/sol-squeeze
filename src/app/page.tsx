@@ -85,13 +85,15 @@ export default function Home() {
       const accounts = await connection.getParsedProgramAccounts(TOKEN_PROGRAM_ID, { filters })
       console.log(`Found ${accounts.length} token account(s) for wallet ${publicKey.toBase58()}.`);
 
-      const fetchedTokens: Token[] = accounts.map((account, i) => {
-        // Parse the account data
-        const parsedAccountInfo: any = account.account.data;
-        const mintAddress: string = parsedAccountInfo["parsed"]["info"]["mint"];
-        const tokenBalance: number = parsedAccountInfo["parsed"]["info"]["tokenAmount"]["uiAmount"];
-        return { mint: mintAddress, amount: tokenBalance };
-      });
+      const fetchedTokens: Token[] = accounts
+        .map((account, i) => {
+          // Parse the account data
+          const parsedAccountInfo: any = account.account.data;
+          const mintAddress: string = parsedAccountInfo["parsed"]["info"]["mint"];
+          const tokenBalance: number = parsedAccountInfo["parsed"]["info"]["tokenAmount"]["uiAmount"];
+          return { mint: mintAddress, amount: tokenBalance };
+        })
+        .filter(token => token.amount > 0);
 
       setTokens(fetchedTokens);
 
@@ -121,10 +123,8 @@ export default function Home() {
               return aPriority - bPriority;
             }
             
-            // If same verification level, sort alphabetically by name (secondary sort)
-            const aName = a.metadata?.name || a.mint;
-            const bName = b.metadata?.name || b.mint;
-            return aName.localeCompare(bName);
+            // If same verification level, sort by amount (highest to lowest) as secondary sort
+            return (b.amount || 0) - (a.amount || 0);
           });
         });
       });
