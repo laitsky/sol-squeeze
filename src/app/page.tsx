@@ -98,12 +98,19 @@ export default function Home() {
       setTokens(fetchedTokens);
 
       // Fetch metadata for each token
-      fetchedTokens.forEach(async (token, index) => {
+      // FIX: Use mint address as unique identifier instead of array index to prevent
+      // race condition where async metadata loading causes token data mismatch
+      // after array sorting. Previously, when tokens were sorted after metadata loaded,
+      // the array indices would change but async callbacks still used original indices,
+      // leading to wrong metadata being applied to wrong tokens.
+      fetchedTokens.forEach(async (token) => {
         const metadata = await fetchTokenMetadata(token.mint);
         const isVerified = isTokenVerified(metadata);
         setTokens(prevTokens => {
-          const updatedTokens = prevTokens.map((prevToken, prevIndex) => 
-            prevIndex === index ? { ...prevToken, metadata, isVerified } : prevToken
+          // Find and update the specific token by mint address, not by index
+          // This ensures the correct token gets updated even after sorting
+          const updatedTokens = prevTokens.map((prevToken) => 
+            prevToken.mint === token.mint ? { ...prevToken, metadata, isVerified } : prevToken
           );
           // Sort tokens: strict > verified > community > unverified
           return updatedTokens.sort((a, b) => {
