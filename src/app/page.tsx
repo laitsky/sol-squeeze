@@ -90,10 +90,6 @@ export default function Home() {
         const parsedAccountInfo: any = account.account.data;
         const mintAddress: string = parsedAccountInfo["parsed"]["info"]["mint"];
         const tokenBalance: number = parsedAccountInfo["parsed"]["info"]["tokenAmount"]["uiAmount"];
-        // Log results
-        console.log(`Token Account No. ${i + 1}: ${account.pubkey.toString()}`);
-        console.log(`--Token Mint: ${mintAddress}`);
-        console.log(`--Token Balance: ${tokenBalance}`);
         return { mint: mintAddress, amount: tokenBalance };
       });
 
