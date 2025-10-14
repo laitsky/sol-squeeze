@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import Navbar from '../components/Navbar'
-import { fetchTokenMetadata, getTokenDisplayName, fetchTokenPrices, formatPrice, isTokenVerified, getVerificationLevel } from '../lib/tokenService'
+import { fetchTokenMetadataBatch, getTokenDisplayName, fetchTokenPrices, formatPrice, isTokenVerified, getVerificationLevel } from '../lib/tokenService'
 
 interface TokenMetadata {
   name: string;
@@ -74,65 +74,61 @@ export default function Home() {
 
       setTokens(fetchedTokens);
 
-      // Fetch metadata for each token
-      // FIX: Use mint address as unique identifier instead of array index to prevent
-      // race condition where async metadata loading causes token data mismatch
-      // after array sorting. Previously, when tokens were sorted after metadata loaded,
-      // the array indices would change but async callbacks still used original indices,
-      // leading to wrong metadata being applied to wrong tokens.
-      fetchedTokens.forEach(async (token) => {
-        const metadata = await fetchTokenMetadata(token.mint);
-        const isVerified = isTokenVerified(metadata);
-        setTokens(prevTokens => {
-          // Find and update the specific token by mint address, not by index
-          // This ensures the correct token gets updated even after sorting
-          const updatedTokens = prevTokens.map((prevToken) => 
-            prevToken.mint === token.mint ? { ...prevToken, metadata, isVerified } : prevToken
-          );
-          // Sort tokens: verification status first, then by USDC value/amount
-          return updatedTokens.sort((a, b) => {
-            // Get verification level for both tokens
-            const aLevel = getVerificationLevel(a.metadata || null);
-            const bLevel = getVerificationLevel(b.metadata || null);
-            
-            // Define verification priority: strict > verified > community > unverified (lower number = higher priority)
-            const verificationPriority: Record<string, number> = { strict: 1, verified: 2, community: 3, unverified: 4 };
-            
-            // Get priority values with fallback to unverified (4) if not found
-            const aPriority = verificationPriority[aLevel] ?? 4;
-            const bPriority = verificationPriority[bLevel] ?? 4;
-            
-            // Primary sort: by verification level first
-            if (aPriority !== bPriority) {
-              return aPriority - bPriority;
-            }
-            
-            // Secondary sort: within same verification level, sort by USDC value/amount
-            // Calculate USDC values
-            const aUsdcValue = (a.price && a.amount) ? a.price * a.amount : null;
-            const bUsdcValue = (b.price && b.amount) ? b.price * b.amount : null;
-            
-            // If both have USDC value, sort by highest value first
-            if (aUsdcValue !== null && bUsdcValue !== null) {
-              return bUsdcValue - aUsdcValue;
-            }
-            
-            // Tokens with USDC value come before those without
-            if (aUsdcValue !== null && bUsdcValue === null) {
-              return -1;
-            }
-            if (aUsdcValue === null && bUsdcValue !== null) {
-              return 1;
-            }
-            
-            // Finally, sort by token amount (highest first) for tokens without USDC value
-            return (b.amount || 0) - (a.amount || 0);
-          });
-        });
+      // Fetch metadata for all tokens in a single batch using Helius DAS API
+      // This is much more efficient than individual calls (1 API call vs N calls)
+      const mintAddresses = fetchedTokens.map(token => token.mint);
+      const metadataMap = await fetchTokenMetadataBatch(mintAddresses);
+
+      // Update tokens with fetched metadata
+      const tokensWithMetadata = fetchedTokens.map(token => ({
+        ...token,
+        metadata: metadataMap.get(token.mint) || null,
+        isVerified: isTokenVerified(metadataMap.get(token.mint) || null)
+      }));
+
+      // Sort tokens: verification status first, then by USDC value/amount
+      const sortedTokens = tokensWithMetadata.sort((a, b) => {
+        // Get verification level for both tokens
+        const aLevel = getVerificationLevel(a.metadata || null);
+        const bLevel = getVerificationLevel(b.metadata || null);
+
+        // Define verification priority: strict > verified > community > unverified (lower number = higher priority)
+        const verificationPriority: Record<string, number> = { strict: 1, verified: 2, community: 3, unverified: 4 };
+
+        // Get priority values with fallback to unverified (4) if not found
+        const aPriority = verificationPriority[aLevel] ?? 4;
+        const bPriority = verificationPriority[bLevel] ?? 4;
+
+        // Primary sort: by verification level first
+        if (aPriority !== bPriority) {
+          return aPriority - bPriority;
+        }
+
+        // Secondary sort: within same verification level, sort by USDC value/amount
+        // Calculate USDC values
+        const aUsdcValue = (a.price && a.amount) ? a.price * a.amount : null;
+        const bUsdcValue = (b.price && b.amount) ? b.price * b.amount : null;
+
+        // If both have USDC value, sort by highest value first
+        if (aUsdcValue !== null && bUsdcValue !== null) {
+          return bUsdcValue - aUsdcValue;
+        }
+
+        // Tokens with USDC value come before those without
+        if (aUsdcValue !== null && bUsdcValue === null) {
+          return -1;
+        }
+        if (aUsdcValue === null && bUsdcValue !== null) {
+          return 1;
+        }
+
+        // Finally, sort by token amount (highest first) for tokens without USDC value
+        return (b.amount || 0) - (a.amount || 0);
       });
 
+      setTokens(sortedTokens);
+
       // Fetch prices for all tokens in batch
-      const mintAddresses = fetchedTokens.map(token => token.mint);
       const pricesMap = await fetchTokenPrices(mintAddresses);
       
       setTokens(prevTokens => {

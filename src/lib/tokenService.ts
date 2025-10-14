@@ -8,61 +8,285 @@ interface TokenMetadata {
   tags?: string[]; // Jupiter tags including verification status
 }
 
-// Jupiter API v2 price response format
-// The API returns prices nested under a 'data' object with mint addresses as keys
+// Helius DAS API response types
+interface HeliusAsset {
+  id: string;
+  content?: {
+    metadata?: {
+      name?: string;
+      symbol?: string;
+    };
+    links?: {
+      image?: string;
+    };
+  };
+  token_info?: {
+    decimals?: number;
+    symbol?: string;
+  };
+}
+
+// Jupiter Price API response format
+// The API returns prices with mint addresses as keys
 interface TokenPrice {
   data: {
     [mintAddress: string]: {
       id: string;           // The mint address (same as the key)
-      type: string;         // Price derivation type (e.g., "derivedPrice")
-      price: string;        // Price in USDC as string - needs parsing to number
+      type?: string;        // Price derivation type (e.g., "derivedPrice")
+      price: string | number; // Price in USDC - can be string or number
     };
   };
-  timeTaken: number;        // API processing time in seconds
+  timeTaken?: number;       // API processing time in seconds
 }
 
 // Simple cache to avoid hitting API limits
 const metadataCache = new Map<string, TokenMetadata | null>();
 const priceCache = new Map<string, { price: number; timestamp: number }>();
 
+// Jupiter token list cache - stores entire token list in memory
+let tokenListCache: Map<string, TokenMetadata> | null = null;
+let tokenListTimestamp: number = 0;
+
+/**
+ * Converts IPFS URLs to use a public gateway to avoid CORS issues
+ * @param url The original URL (might be IPFS)
+ * @returns Proxied URL or original URL
+ */
+function resolveImageUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+
+  // Handle IPFS URLs (ipfs:// protocol)
+  if (url.startsWith('ipfs://')) {
+    const cid = url.replace('ipfs://', '');
+    return `https://ipfs.io/ipfs/${cid}`;
+  }
+
+  // Handle IPFS gateway URLs that might have CORS issues
+  if (url.includes('.ipfs.') || url.includes('ipfs.io') || url.includes('cloudflare-ipfs.com')) {
+    // Already using a gateway, return as-is
+    return url;
+  }
+
+  return url;
+}
+
 // Cache prices for 30 seconds to avoid excessive API calls
 const PRICE_CACHE_DURATION = 30 * 1000;
+// Cache token list for 24 hours to minimize API calls
+const TOKEN_LIST_CACHE_DURATION = 24 * 60 * 60 * 1000;
+const TOKEN_LIST_STORAGE_KEY = 'jupiter_token_list_cache';
+const TOKEN_LIST_TIMESTAMP_KEY = 'jupiter_token_list_timestamp';
 
-export async function fetchTokenMetadata(mintAddress: string): Promise<TokenMetadata | null> {
+/**
+ * Fetches token metadata in batch using Helius DAS API
+ * More efficient than individual calls - can fetch up to 1000 tokens per request
+ * @param mintAddresses Array of token mint addresses to fetch
+ * @returns Map of mint address to TokenMetadata
+ */
+export async function fetchTokenMetadataBatch(mintAddresses: string[]): Promise<Map<string, TokenMetadata>> {
+  const metadataMap = new Map<string, TokenMetadata>();
+
+  if (mintAddresses.length === 0) {
+    return metadataMap;
+  }
+
   // Check cache first
-  if (metadataCache.has(mintAddress)) {
-    return metadataCache.get(mintAddress) || null;
+  const uncachedMints = mintAddresses.filter(mint => !metadataCache.has(mint));
+
+  // If all are cached, return from cache
+  if (uncachedMints.length === 0) {
+    mintAddresses.forEach(mint => {
+      const cached = metadataCache.get(mint);
+      if (cached) {
+        metadataMap.set(mint, cached);
+      }
+    });
+    return metadataMap;
+  }
+
+  // Get RPC URL (should be Helius endpoint)
+  const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL;
+
+  if (!rpcUrl) {
+    console.error('NEXT_PUBLIC_SOLANA_RPC_URL not configured');
+    return metadataMap;
   }
 
   try {
-    // Use Jupiter API to fetch token metadata
-    const response = await fetch(`https://lite-api.jup.ag/tokens/v1/token/${mintAddress}`);
-    
-    if (!response.ok) {
-      // If token not found in Jupiter, cache null to avoid repeated requests
-      metadataCache.set(mintAddress, null);
-      return null;
+    // Helius DAS API supports up to 1000 assets per request
+    // Split into chunks if needed
+    const chunkSize = 1000;
+    const chunks: string[][] = [];
+
+    for (let i = 0; i < uncachedMints.length; i += chunkSize) {
+      chunks.push(uncachedMints.slice(i, i + chunkSize));
     }
 
-    const data = await response.json();
-    
-    const metadata: TokenMetadata = {
-      name: data.name || 'Unknown Token',
-      symbol: data.symbol || 'UNKNOWN',
-      decimals: data.decimals || 0,
-      logoURI: data.logoURI,
-      address: mintAddress,
-      tags: data.tags || []
-    };
+    console.log(`Fetching metadata for ${uncachedMints.length} tokens using Helius DAS API...`);
 
-    // Cache the result
-    metadataCache.set(mintAddress, metadata);
-    return metadata;
+    // Process each chunk
+    for (const chunk of chunks) {
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 'metadata-batch',
+          method: 'getAssetBatch',
+          params: {
+            ids: chunk
+          }
+        })
+      });
+
+      if (!response.ok) {
+        console.error(`Helius API returned ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+
+      if (data.result && Array.isArray(data.result)) {
+        // Try to get Jupiter token list for verification tags
+        let jupiterTokens: Map<string, TokenMetadata> | null = null;
+        try {
+          jupiterTokens = await fetchJupiterTokenList();
+        } catch (error) {
+          console.warn('Could not fetch Jupiter token list for verification tags');
+        }
+
+        data.result.forEach((asset: HeliusAsset) => {
+          if (!asset) return;
+
+          // Check if token exists in Jupiter list for verification tags
+          const jupiterToken = jupiterTokens?.get(asset.id);
+
+          const metadata: TokenMetadata = {
+            name: asset.content?.metadata?.name || jupiterToken?.name || 'Unknown Token',
+            symbol: asset.content?.metadata?.symbol || asset.token_info?.symbol || jupiterToken?.symbol || 'UNKNOWN',
+            decimals: asset.token_info?.decimals || jupiterToken?.decimals || 0,
+            logoURI: resolveImageUrl(asset.content?.links?.image || jupiterToken?.logoURI),
+            address: asset.id,
+            tags: jupiterToken?.tags || [] // Use Jupiter tags for verification if available
+          };
+
+          // Cache the result
+          metadataCache.set(asset.id, metadata);
+          metadataMap.set(asset.id, metadata);
+        });
+      }
+    }
+
+    // Add cached results for mints that were already in cache
+    mintAddresses.forEach(mint => {
+      if (!metadataMap.has(mint) && metadataCache.has(mint)) {
+        const cached = metadataCache.get(mint);
+        if (cached) {
+          metadataMap.set(mint, cached);
+        }
+      }
+    });
+
+    console.log(`Successfully fetched metadata for ${metadataMap.size} tokens`);
+    return metadataMap;
   } catch (error) {
-    console.error(`Error fetching metadata for ${mintAddress}:`, error);
-    // Cache null to avoid repeated failed requests
-    metadataCache.set(mintAddress, null);
-    return null;
+    console.error('Error fetching token metadata from Helius:', error);
+    return metadataMap;
+  }
+}
+
+/**
+ * Fetches and caches the entire Jupiter token list
+ * This reduces API calls from N requests (one per token) to just 1 request
+ * Cache persists in localStorage for 24 hours
+ */
+async function fetchJupiterTokenList(): Promise<Map<string, TokenMetadata>> {
+  const now = Date.now();
+
+  // Check if in-memory cache is still valid
+  if (tokenListCache && (now - tokenListTimestamp) < TOKEN_LIST_CACHE_DURATION) {
+    return tokenListCache;
+  }
+
+  // Try to load from localStorage first
+  if (typeof window !== 'undefined') {
+    try {
+      const cachedData = localStorage.getItem(TOKEN_LIST_STORAGE_KEY);
+      const cachedTimestamp = localStorage.getItem(TOKEN_LIST_TIMESTAMP_KEY);
+
+      if (cachedData && cachedTimestamp) {
+        const timestamp = parseInt(cachedTimestamp, 10);
+        // Check if localStorage cache is still valid (within 24 hours)
+        if ((now - timestamp) < TOKEN_LIST_CACHE_DURATION) {
+          const parsedData = JSON.parse(cachedData);
+          tokenListCache = new Map(parsedData);
+          tokenListTimestamp = timestamp;
+          console.log(`Loaded ${tokenListCache.size} tokens from localStorage cache`);
+          return tokenListCache;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to load token list from localStorage:', error);
+    }
+  }
+
+  // Fetch fresh token list from Jupiter
+  try {
+    console.log('Fetching fresh token list from Jupiter API...');
+    // Use CDN endpoint which is more reliable than API endpoint
+    const response = await fetch('https://token.jup.ag/all', {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Jupiter API returned ${response.status}`);
+    }
+
+    const tokens = await response.json();
+
+    // Build a Map for O(1) lookups by mint address
+    // Filter for tokens with verification tags only to reduce cache size
+    const tokenMap = new Map<string, TokenMetadata>();
+    tokens.forEach((token: any) => {
+      const tags = token.tags || [];
+      // Only cache verified, strict, or community tagged tokens
+      if (tags.includes('verified') || tags.includes('strict') || tags.includes('community')) {
+        tokenMap.set(token.address, {
+          name: token.name,
+          symbol: token.symbol,
+          decimals: token.decimals,
+          logoURI: resolveImageUrl(token.logoURI),
+          address: token.address,
+          tags: tags
+        });
+      }
+    });
+
+    // Update in-memory cache
+    tokenListCache = tokenMap;
+    tokenListTimestamp = now;
+
+    // Persist to localStorage
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(TOKEN_LIST_STORAGE_KEY, JSON.stringify(Array.from(tokenMap.entries())));
+        localStorage.setItem(TOKEN_LIST_TIMESTAMP_KEY, now.toString());
+        console.log(`Cached ${tokenMap.size} tokens to localStorage`);
+      } catch (error) {
+        console.warn('Failed to save token list to localStorage:', error);
+      }
+    }
+
+    return tokenMap;
+  } catch (error) {
+    console.error('Error fetching Jupiter token list:', error);
+    // Return empty map on error - will fall back to individual API calls
+    return new Map();
   }
 }
 
@@ -84,27 +308,36 @@ export async function fetchTokenPrices(mintAddresses: string[]): Promise<Map<str
     }
   });
 
-  // Batch fetch uncached prices from Jupiter API v2
+  // Batch fetch uncached prices from Jupiter API
   if (uncachedMints.length > 0) {
     try {
-      // Jupiter API v2 endpoint - accepts comma-separated mint addresses
+      // Jupiter Price API v4 - accepts comma-separated mint addresses
       const response = await fetch(
-        `https://lite-api.jup.ag/price/v2?ids=${uncachedMints.join(',')}`
+        `https://price.jup.ag/v4/price?ids=${uncachedMints.join(',')}`,
+        {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+          },
+        }
       );
       
       if (response.ok) {
-        // Parse the Jupiter API v2 response format
+        // Parse the Jupiter Price API response format
         const data: TokenPrice = await response.json();
-        
+
         // Process each mint address we requested
         uncachedMints.forEach(mint => {
-          // Access price data from the nested 'data' object using mint address as key
+          // Access price data from the 'data' object using mint address as key
           const priceInfo = data.data?.[mint];
-          if (priceInfo && priceInfo.price) {
-            // Jupiter API v2 returns price as string, convert to number
-            const price = parseFloat(priceInfo.price);
+          if (priceInfo && priceInfo.price !== undefined && priceInfo.price !== null) {
+            // Jupiter API can return price as string or number
+            const price = typeof priceInfo.price === 'string'
+              ? parseFloat(priceInfo.price)
+              : priceInfo.price;
+
             // Ensure the parsed price is a valid number
-            if (!isNaN(price)) {
+            if (!isNaN(price) && price > 0) {
               pricesMap.set(mint, price);
               // Cache the price with timestamp to avoid repeated API calls
               priceCache.set(mint, { price, timestamp: now });
@@ -113,6 +346,8 @@ export async function fetchTokenPrices(mintAddresses: string[]): Promise<Map<str
           // If no price data is found, the token simply won't be added to pricesMap
           // This will result in 'N/A' being displayed in the UI
         });
+      } else {
+        console.warn(`Jupiter Price API returned ${response.status} for ${uncachedMints.length} tokens`);
       }
       // If response is not ok, silently fail - prices will show as 'N/A'
     } catch (error) {
