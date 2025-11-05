@@ -152,7 +152,8 @@ export async function fetchTokenMetadataBatch(mintAddresses: string[]): Promise<
         try {
           jupiterTokens = await fetchJupiterTokenList();
         } catch (error) {
-          console.warn('Could not fetch Jupiter token list for verification tags');
+          console.warn('Could not fetch Jupiter token list for verification tags:', error);
+          // Continue without verification tags - metadata will still be fetched from Helius
         }
 
         data.result.forEach((asset: HeliusAsset) => {
@@ -233,8 +234,8 @@ async function fetchJupiterTokenList(): Promise<Map<string, TokenMetadata>> {
   // Fetch fresh token list from Jupiter
   try {
     console.log('Fetching fresh token list from Jupiter API...');
-    // Use CDN endpoint which is more reliable than API endpoint
-    const response = await fetch('https://token.jup.ag/all', {
+    // Use Jupiter's validated token list from GitHub as a fallback since token.jup.ag is deprecated
+    const response = await fetch('https://tokens.jup.ag/tokens?tags=verified,strict,community', {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -245,7 +246,10 @@ async function fetchJupiterTokenList(): Promise<Map<string, TokenMetadata>> {
       throw new Error(`Jupiter API returned ${response.status}`);
     }
 
-    const tokens = await response.json();
+    const data = await response.json();
+
+    // Handle both array response and object response with tokens array
+    const tokens = Array.isArray(data) ? data : (data.tokens || []);
 
     // Build a Map for O(1) lookups by mint address
     // Filter for tokens with verification tags only to reduce cache size
