@@ -1,28 +1,20 @@
 'use client'
 import dynamic from 'next/dynamic'
-import { cn } from '@/lib/utils'
 
 const WalletMultiButtonDynamic = dynamic(
   () => import('@solana/wallet-adapter-react-ui').then((mod) => mod.WalletMultiButton),
   {
     ssr: false,
-    loading: () => <div className="text-sm text-muted-foreground">Loading wallet...</div>
+    loading: () => <div className="h-8 w-28 bg-muted" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(0 0% 15%) 50%, transparent 100%)' }} />
   }
 )
 
 export default function Navbar() {
   return (
-    <nav className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="container flex h-16 items-center justify-between max-w-6xl">
-        <div className="flex items-center space-x-2">
-          <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-purple-400 bg-clip-text text-transparent">
-            Sol Vacuum
-          </h1>
-        </div>
-        
-        <div className="flex items-center space-x-4">
-          <WalletMultiButtonDynamic />
-        </div>
+    <nav className="sticky top-0 z-50 w-full bg-background/80 backdrop-blur-md border-b border-border">
+      <div className="max-w-[1000px] mx-auto px-6 flex h-12 items-center justify-between">
+        <span className="font-serif text-lg italic tracking-tight">Sol Vacuum</span>
+        <WalletMultiButtonDynamic />
       </div>
     </nav>
   )

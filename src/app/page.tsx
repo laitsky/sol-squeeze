@@ -3,10 +3,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { Connection } from '@solana/web3.js'
-import { Wallet, Coins, Loader2 } from 'lucide-react'
-import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Loader2, ArrowRight } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
+import { cn } from '@/lib/utils'
 import Navbar from '../components/Navbar'
 import { fetchWalletTokenBalances, getTokenDisplayName, formatPrice, isTokenVerified, getVerificationLevel } from '../lib/tokenService'
 import { buildJupiterSwapTransaction, getJupiterQuote, SOL_MINT, toRawAmount } from '../lib/swapService'
@@ -106,10 +106,10 @@ function getQuoteOutAmountRaw(quoteResponse: Record<string, unknown>): string | 
 }
 
 function formatSolEstimate(amount: number | null): string {
-  if (amount === null) return 'N/A'
-  if (amount <= 0) return '0 SOL'
-  if (amount < 0.000001) return '<0.000001 SOL'
-  return `${amount.toLocaleString(undefined, { maximumFractionDigits: 6 })} SOL`
+  if (amount === null) return '--'
+  if (amount <= 0) return '0'
+  if (amount < 0.000001) return '<0.000001'
+  return amount.toLocaleString(undefined, { maximumFractionDigits: 6 })
 }
 
 async function mapWithConcurrency<T, R>(
@@ -133,6 +133,10 @@ async function mapWithConcurrency<T, R>(
 
   await Promise.all(workers)
   return results
+}
+
+function truncateAddress(address: string): string {
+  return `${address.slice(0, 4)}...${address.slice(-4)}`
 }
 
 export default function Home() {
@@ -173,6 +177,20 @@ export default function Home() {
   }, [tokens])
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
+
+  const totalPortfolioValue = useMemo(() => {
+    return tokens.reduce((total, token) => {
+      if (token.price && token.amount) {
+        return total + token.price * token.amount
+      }
+      return total
+    }, 0)
+  }, [tokens])
+
+  const sellProgress = useMemo(() => {
+    if (!isSelling || selectedMints.size === 0) return 0
+    return (Object.keys(sellResults).length / selectedMints.size) * 100
+  }, [isSelling, sellResults, selectedMints])
 
   useEffect(() => {
     if (!connected || isSelling || selectedMints.size === 0) {
@@ -264,7 +282,7 @@ export default function Home() {
         failedCount,
         skippedCount,
         loading: false,
-        error: quotedCount === 0 ? 'No quote available for the selected tokens.' : null,
+        error: quotedCount === 0 ? 'No quotes available.' : null,
       })
     }, 400)
 
@@ -337,7 +355,7 @@ export default function Home() {
 
     const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL
     if (!rpcUrl) {
-      setSellSummary('Cannot sell tokens: NEXT_PUBLIC_SOLANA_RPC_URL is not configured.')
+      setSellSummary('RPC URL not configured.')
       return
     }
 
@@ -359,7 +377,7 @@ export default function Home() {
     for (const token of selectedTokens) {
       if (!isSellableToken(token)) {
         skipped += 1
-        updateSellResult(token.mint, { state: 'skipped', message: 'Token is not sellable.' })
+        updateSellResult(token.mint, { state: 'skipped', message: 'Not sellable.' })
         continue
       }
 
@@ -368,12 +386,12 @@ export default function Home() {
 
       if (rawAmount === '0') {
         skipped += 1
-        updateSellResult(token.mint, { state: 'skipped', message: 'Balance is too small to swap.' })
+        updateSellResult(token.mint, { state: 'skipped', message: 'Balance too small.' })
         continue
       }
 
       try {
-        updateSellResult(token.mint, { state: 'building', message: 'Getting best swap route...' })
+        updateSellResult(token.mint, { state: 'building', message: 'Routing...' })
         const quoteResponse = await getJupiterQuote({
           inputMint: token.mint,
           outputMint: SOL_MINT,
@@ -381,7 +399,7 @@ export default function Home() {
           slippageBps: 100,
         })
 
-        updateSellResult(token.mint, { state: 'awaiting-signature', message: 'Approve this swap in your wallet.' })
+        updateSellResult(token.mint, { state: 'awaiting-signature', message: 'Sign in wallet.' })
         const { transaction, lastValidBlockHeight } = await buildJupiterSwapTransaction({
           quoteResponse,
           userPublicKey: publicKey.toBase58(),
@@ -393,7 +411,7 @@ export default function Home() {
           preflightCommitment: 'confirmed',
         })
 
-        updateSellResult(token.mint, { state: 'submitted', signature, message: 'Transaction submitted. Waiting for confirmation...' })
+        updateSellResult(token.mint, { state: 'submitted', signature, message: 'Confirming...' })
 
         const confirmation = await connection.confirmTransaction(
           {
@@ -410,7 +428,7 @@ export default function Home() {
 
         succeeded += 1
         soldMints.add(token.mint)
-        updateSellResult(token.mint, { state: 'confirmed', signature, message: 'Swap confirmed.' })
+        updateSellResult(token.mint, { state: 'confirmed', signature, message: 'Done.' })
       } catch (error) {
         failed += 1
         updateSellResult(token.mint, { state: 'failed', message: errorMessage(error) })
@@ -418,7 +436,7 @@ export default function Home() {
     }
 
     setIsSelling(false)
-    setSellSummary(`Batch complete: ${succeeded} sold, ${failed} failed, ${skipped} skipped.`)
+    setSellSummary(`${succeeded} sold, ${failed} failed, ${skipped} skipped.`)
 
     if (soldMints.size > 0) {
       setSelectedMints(prevSelected => {
@@ -430,277 +448,404 @@ export default function Home() {
     }
   }
 
+  // ─── Derived: sell summary parsed ──────────────────────
+  const parsedSummary = useMemo(() => {
+    if (!sellSummary) return null
+    const match = sellSummary.match(/(\d+) sold, (\d+) failed, (\d+) skipped/)
+    if (!match) return null
+    return { sold: Number(match[1]), failed: Number(match[2]), skipped: Number(match[3]) }
+  }, [sellSummary])
+
+  // ─── Render ──────────────────────────────────────────────
+
   return (
     <>
       <Navbar />
-      <main className="min-h-screen bg-gradient-to-br from-background via-background to-slate-900">
-        <div className="container max-w-6xl mx-auto px-4 py-12">
-          <div className="space-y-10">
-            <div className="text-center space-y-4">
-              <div className="flex justify-center mb-6">
-                <div className="p-4 rounded-full bg-primary/10 border border-primary/20">
-                  <Coins className="h-12 w-12 text-primary" />
+      <main className="min-h-screen">
+        {connected ? (
+          <div
+            className="max-w-[1000px] mx-auto px-6"
+            style={{ animation: 'fadeIn 0.3s ease-out' }}
+          >
+
+            {/* ── Summary metrics ─────────────────────────────── */}
+            <div className="py-6 border-b border-border">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 font-mono">
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1.5">
+                    Tokens
+                  </div>
+                  <div className="text-lg tabular-nums leading-none">
+                    {loading ? (
+                      <span className="inline-block w-8 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
+                    ) : tokens.length}
+                  </div>
                 </div>
-              </div>
-              <h1 className="text-4xl md:text-6xl font-bold bg-gradient-to-r from-primary via-purple-300 to-blue-300 bg-clip-text text-transparent">
-                SOL Token Vacuum
-              </h1>
-              <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-                Connect, select dust tokens, and sell them to SOL in one batch.
-              </p>
-            </div>
-
-            {connected ? (
-              <div className="space-y-8">
-                <div className="flex items-center justify-center gap-3">
-                  <Coins className="h-6 w-6 text-primary" />
-                  <h2 className="text-2xl font-semibold">Your Token Portfolio</h2>
-                  {(loading || isSelling) && <Loader2 className="h-5 w-5 text-primary animate-spin" />}
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1.5">
+                    Sellable
+                  </div>
+                  <div className="text-lg tabular-nums leading-none">
+                    {loading ? (
+                      <span className="inline-block w-8 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
+                    ) : sellableTokens.length}
+                  </div>
                 </div>
-
-                {!loading && tokens.length > 0 && (
-                  <div className="space-y-3">
-                    <div className="space-y-3 rounded-lg border border-border/60 bg-card/40 p-4">
-                      <div className="text-sm text-muted-foreground">
-                        <span className="font-semibold text-foreground">{selectedMints.size}</span> selected of{' '}
-                        <span className="font-semibold text-foreground">{sellableTokens.length}</span> sellable tokens
-                        {isSelling && <span className="ml-2">Approve swaps in your wallet as prompted.</span>}
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2">
-                        <label className="text-sm text-muted-foreground">Dust threshold (USD)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={dustThresholdUsd}
-                          onChange={(event) => {
-                            const parsedValue = Number(event.target.value)
-                            setDustThresholdUsd(Number.isFinite(parsedValue) ? parsedValue : 0)
-                          }}
-                          disabled={isSelling}
-                          className="w-28 px-2 py-1 rounded-md border border-border/70 bg-background text-sm"
-                        />
-                        <button
-                          type="button"
-                          onClick={autoSelectDustTokens}
-                          disabled={isSelling || sellableTokens.length === 0}
-                          className="px-3 py-2 text-sm rounded-md border border-border/70 hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Auto-select Dust
-                        </button>
-                      </div>
-
-                      <div className="text-sm text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-1">
-                        <span>
-                          Estimated SOL out: <span className="font-semibold text-foreground">
-                            {sellEstimate.loading ? 'Calculating...' : formatSolEstimate(sellEstimate.totalSol)}
-                          </span>
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1.5">
+                    Portfolio
+                  </div>
+                  <div className="text-lg tabular-nums leading-none">
+                    {loading ? (
+                      <span className="inline-block w-16 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
+                    ) : totalPortfolioValue > 0 ? formatPrice(totalPortfolioValue) : '$0.00'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1.5">
+                    {selectedMints.size > 0 ? 'Est. Output' : 'Selected'}
+                  </div>
+                  <div className="text-lg tabular-nums leading-none">
+                    {selectedMints.size > 0 ? (
+                      sellEstimate.loading ? (
+                        <span className="text-muted-foreground flex items-center gap-2">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         </span>
-                        <span>
-                          Quotes: <span className="font-semibold text-foreground">{sellEstimate.quotedCount}</span>
-                        </span>
-                        <span>
-                          Unquoted: <span className="font-semibold text-foreground">{sellEstimate.failedCount}</span>
-                        </span>
-                        <span>
-                          Not estimated: <span className="font-semibold text-foreground">{sellEstimate.skippedCount}</span>
-                        </span>
-                        {sellEstimate.loading && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
-                      </div>
-                      {sellEstimate.error && (
-                        <p className="text-xs text-amber-300">{sellEstimate.error}</p>
-                      )}
-
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={selectAllSellable}
-                          disabled={isSelling || sellableTokens.length === 0}
-                          className="px-3 py-2 text-sm rounded-md border border-border/70 hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Select All
-                        </button>
-                        <button
-                          type="button"
-                          onClick={clearSelection}
-                          disabled={isSelling || selectedMints.size === 0}
-                          className="px-3 py-2 text-sm rounded-md border border-border/70 hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Clear
-                        </button>
-                        <button
-                          type="button"
-                          onClick={sellSelectedTokens}
-                          disabled={isSelling || selectedMints.size === 0}
-                          className="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-                        >
-                          {isSelling && <Loader2 className="h-4 w-4 animate-spin" />}
-                          Sell Selected ({selectedMints.size})
-                        </button>
-                      </div>
-                    </div>
-                    {sellSummary && (
-                      <p className="text-sm text-muted-foreground">{sellSummary}</p>
+                      ) : (
+                        <span>{formatSolEstimate(sellEstimate.totalSol)} <span className="text-sm text-muted-foreground">SOL</span></span>
+                      )
+                    ) : (
+                      <span className="text-muted-foreground">0</span>
                     )}
                   </div>
-                )}
-
-                {loading ? (
-                  <div className="flex flex-col items-center justify-center py-20 space-y-4">
-                    <Loader2 className="h-12 w-12 text-primary animate-spin" />
-                    <p className="text-muted-foreground">Loading your tokens...</p>
-                  </div>
-                ) : tokens.length > 0 ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {tokens.map((token, index) => {
-                      const execution = sellResults[token.mint]
-                      const selected = selectedMints.has(token.mint)
-                      const sellable = isSellableToken(token)
-                      const verificationLevel = getVerificationLevel(token.metadata || null)
-                      const txUrl = execution?.signature ? `https://solscan.io/tx/${execution.signature}` : null
-
-                      return (
-                        <Card
-                          key={token.mint}
-                          className="group hover:scale-105 transition-all duration-300 border-border/50 bg-card/50 backdrop-blur-sm hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5"
-                        >
-                          <CardHeader className="pb-3">
-                            <div className="flex justify-between items-start gap-2">
-                              <div className="flex items-start gap-2">
-                                <input
-                                  type="checkbox"
-                                  checked={selected}
-                                  onChange={() => toggleMintSelection(token.mint)}
-                                  disabled={isSelling || !sellable}
-                                  className="h-4 w-4 mt-1 accent-primary disabled:cursor-not-allowed"
-                                />
-                                <div className="flex gap-2 flex-wrap">
-                                  <Badge variant="default" className="bg-primary/10 text-primary border-primary/20">
-                                    Token #{index + 1}
-                                  </Badge>
-                                  {token.metadata && (
-                                    <Badge
-                                      variant={
-                                        verificationLevel === 'strict' ? 'success' :
-                                          verificationLevel === 'verified' ? 'info' :
-                                            verificationLevel === 'community' ? 'warning' :
-                                              'outline'
-                                      }
-                                      className="text-xs"
-                                    >
-                                      {verificationLevel.toUpperCase()}
-                                    </Badge>
-                                  )}
-                                  {!sellable && (
-                                    <Badge variant="outline" className="text-xs">
-                                      UNSUPPORTED
-                                    </Badge>
-                                  )}
-                                  {execution && (
-                                    <Badge variant={executionBadgeVariant(execution.state)} className="text-xs">
-                                      {executionLabel(execution.state)}
-                                    </Badge>
-                                  )}
-                                </div>
-                              </div>
-                              {token.price && (
-                                <span className="text-sm font-bold text-emerald-300">
-                                  {formatPrice(token.price)}
-                                </span>
-                              )}
-                            </div>
-                          </CardHeader>
-
-                          <CardContent className="space-y-4">
-                            <div className="flex items-center space-x-3">
-                              <Avatar className="h-12 w-12 border-2 border-primary/20">
-                                <AvatarImage src={token.metadata?.logoURI} />
-                                <AvatarFallback className="bg-primary/10 text-primary font-bold">
-                                  {token.metadata?.symbol?.charAt(0) || 'T'}
-                                </AvatarFallback>
-                              </Avatar>
-                              <div className="flex-1 min-w-0">
-                                <h3 className="font-semibold truncate">
-                                  {token.metadata ?
-                                    getTokenDisplayName(token.mint, token.metadata) :
-                                    'Loading...'
-                                  }
-                                </h3>
-                                <p className="text-xs font-mono text-muted-foreground truncate">
-                                  {token.mint}
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="flex justify-between items-center pt-4 border-t border-border/50">
-                              <div>
-                                <p className="text-sm text-muted-foreground">Balance</p>
-                                <p className="text-xl font-bold text-primary">
-                                  {token.amount?.toLocaleString() || '0'}
-                                </p>
-                              </div>
-
-                              <div className="text-right">
-                                <p className="text-sm text-muted-foreground">Value (USDC)</p>
-                                <p className="text-lg font-bold text-emerald-300">
-                                  {(token.price && token.amount) ?
-                                    formatPrice(token.price * token.amount) :
-                                    token.priceFetched ? 'N/A' : 'Loading...'
-                                  }
-                                </p>
-                              </div>
-                            </div>
-
-                            {execution && (
-                              <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-                                <p className="text-xs text-muted-foreground break-words">{execution.message}</p>
-                                {txUrl && (
-                                  <a
-                                    href={txUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-xs text-primary hover:underline"
-                                  >
-                                    View transaction
-                                  </a>
-                                )}
-                              </div>
-                            )}
-                          </CardContent>
-                        </Card>
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-20 space-y-4 text-center">
-                    <div className="p-4 rounded-full bg-muted/20 border border-border/50">
-                      <Coins className="h-12 w-12 text-muted-foreground" />
-                    </div>
-                    <h3 className="text-lg font-semibold text-muted-foreground">
-                      No tokens found in your wallet
-                    </h3>
-                    <p className="text-muted-foreground">
-                      Your SPL tokens will appear here once detected
-                    </p>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center py-20 space-y-4 text-center">
-                <div className="p-4 rounded-full bg-muted/20 border border-border/50">
-                  <Wallet className="h-12 w-12 text-muted-foreground" />
                 </div>
-                <h3 className="text-lg font-semibold text-muted-foreground">
-                  Connect your wallet to get started
-                </h3>
-                <p className="text-muted-foreground">
-                  Scan wallet balances and batch-sell dust tokens in one flow
-                </p>
+              </div>
+            </div>
+
+            {/* ── Controls toolbar ─────────────────────────────── */}
+            {!loading && tokens.length > 0 && (
+              <div className="py-4 border-b border-border flex flex-wrap items-center gap-2.5 font-mono text-xs">
+                {/* Dust threshold group */}
+                <div className="flex items-center gap-1.5 bg-muted/50 h-7 px-2">
+                  <span className="text-muted-foreground text-[10px] uppercase tracking-wider">dust</span>
+                  <span className="text-muted-foreground">&lt;</span>
+                  <span className="text-muted-foreground">$</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={dustThresholdUsd}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      setDustThresholdUsd(Number.isFinite(v) ? v : 0)
+                    }}
+                    disabled={isSelling}
+                    className="w-12 bg-transparent text-xs font-mono text-foreground focus:outline-none disabled:opacity-40 tabular-nums"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={autoSelectDustTokens}
+                  disabled={isSelling || sellableTokens.length === 0}
+                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
+                >
+                  auto-select
+                </button>
+
+                <div className="w-px h-4 bg-border mx-0.5" />
+
+                <button
+                  type="button"
+                  onClick={selectAllSellable}
+                  disabled={isSelling || sellableTokens.length === 0}
+                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
+                >
+                  all
+                </button>
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  disabled={isSelling || selectedMints.size === 0}
+                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
+                >
+                  clear
+                </button>
+
+                <div className="flex-1" />
+
+                {sellEstimate.error && (
+                  <span className="text-[hsl(var(--status-warning))] text-[11px]">{sellEstimate.error}</span>
+                )}
+
+                {selectedMints.size > 0 && !sellEstimate.loading && sellEstimate.quotedCount > 0 && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    {sellEstimate.quotedCount} quoted
+                  </span>
+                )}
+
+                <button
+                  type="button"
+                  onClick={sellSelectedTokens}
+                  disabled={isSelling || selectedMints.size === 0}
+                  className={cn(
+                    "h-8 px-4 text-xs font-mono uppercase tracking-wider transition-all inline-flex items-center gap-2",
+                    "bg-foreground text-background",
+                    selectedMints.size > 0 && !isSelling
+                      ? "hover:opacity-80 active:scale-[0.98]"
+                      : "",
+                    "disabled:opacity-15"
+                  )}
+                >
+                  {isSelling ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <ArrowRight className="h-3 w-3" />
+                  )}
+                  sell{selectedMints.size > 0 ? ` ${selectedMints.size}` : ''}
+                </button>
               </div>
             )}
+
+            {/* ── Sell progress ─────────────────────────────────── */}
+            {isSelling && (
+              <div className="py-4 border-b border-border font-mono text-xs text-muted-foreground">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-foreground" />
+                    <span>Approve each swap in your wallet</span>
+                  </div>
+                  <span className="tabular-nums text-foreground">
+                    {Object.keys(sellResults).length}/{selectedMints.size}
+                  </span>
+                </div>
+                <div className="h-1 bg-border relative overflow-hidden">
+                  <div
+                    className="h-full bg-foreground transition-all duration-700 ease-out"
+                    style={{ width: `${sellProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* ── Sell summary ──────────────────────────────────── */}
+            {parsedSummary && (
+              <div
+                className="py-3.5 border-b border-border font-mono text-xs flex items-center gap-4"
+                style={{ animation: 'fadeUp 0.3s ease-out' }}
+              >
+                {parsedSummary.sold > 0 && (
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-1.5 h-1.5 bg-[hsl(var(--status-success))]" />
+                    <span>{parsedSummary.sold} sold</span>
+                  </span>
+                )}
+                {parsedSummary.failed > 0 && (
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-1.5 h-1.5 bg-[hsl(var(--status-error))]" />
+                    <span>{parsedSummary.failed} failed</span>
+                  </span>
+                )}
+                {parsedSummary.skipped > 0 && (
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-1.5 h-1.5 bg-muted-foreground/40" />
+                    <span className="text-muted-foreground">{parsedSummary.skipped} skipped</span>
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* ── Token table ──────────────────────────────────── */}
+            {loading ? (
+              <div className="py-24 flex flex-col items-center gap-4">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <span className="font-mono text-xs text-muted-foreground">Scanning wallet...</span>
+              </div>
+            ) : tokens.length > 0 ? (
+              <div>
+                {/* Header */}
+                <div className="hidden md:grid grid-cols-[32px_1fr_80px_100px_90px] gap-3 items-center px-1 py-2.5 border-b border-border text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+                  <div />
+                  <div>Token</div>
+                  <div>Status</div>
+                  <div className="text-right">Balance</div>
+                  <div className="text-right">Value</div>
+                </div>
+
+                {/* Rows */}
+                {tokens.map((token, index) => {
+                  const execution = sellResults[token.mint]
+                  const selected = selectedMints.has(token.mint)
+                  const sellable = isSellableToken(token)
+                  const verificationLevel = getVerificationLevel(token.metadata || null)
+                  const txUrl = execution?.signature ? `https://solscan.io/tx/${execution.signature}` : null
+                  const usdValue = (token.price && token.amount) ? token.price * token.amount : null
+                  const name = token.metadata
+                    ? getTokenDisplayName(token.mint, token.metadata)
+                    : 'Unknown'
+
+                  return (
+                    <div
+                      key={token.mint}
+                      className={cn(!sellable && 'opacity-30')}
+                      style={{
+                        animation: `fadeUp 0.25s ease-out ${Math.min(index * 0.02, 0.5)}s both`,
+                      }}
+                    >
+                      {/* Main row */}
+                      <div
+                        className={cn(
+                          "grid grid-cols-[32px_1fr_90px] md:grid-cols-[32px_1fr_80px_100px_90px] gap-3 items-center py-3 border-b border-border/40 transition-all duration-150",
+                          selected
+                            ? "bg-foreground/[0.04] border-l-2 border-l-foreground pl-2.5 md:pl-0.5"
+                            : "border-l-2 border-l-transparent pl-2.5 md:pl-0.5",
+                          sellable && !isSelling && "hover:bg-foreground/[0.025] cursor-pointer"
+                        )}
+                        onClick={() => sellable && !isSelling && toggleMintSelection(token.mint)}
+                      >
+                        {/* Checkbox */}
+                        <div className="flex justify-center">
+                          <div
+                            className={cn(
+                              "w-4 h-4 border flex items-center justify-center transition-all duration-150",
+                              selected
+                                ? "border-foreground bg-foreground"
+                                : "border-muted-foreground/25 hover:border-muted-foreground/50",
+                              isSelling && "opacity-40"
+                            )}
+                          >
+                            {selected && (
+                              <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                                <path d="M2 5L4 7L8 3" stroke="hsl(var(--background))" strokeWidth="1.5" strokeLinecap="square" />
+                              </svg>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Token info */}
+                        <div className="flex items-center gap-3 min-w-0">
+                          <Avatar className="h-7 w-7 shrink-0 rounded-none border border-border/50">
+                            <AvatarImage src={token.metadata?.logoURI} />
+                            <AvatarFallback className="rounded-none bg-muted text-muted-foreground text-[9px] font-mono">
+                              {token.metadata?.symbol?.charAt(0) || '?'}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="min-w-0">
+                            <div className="flex items-baseline gap-2">
+                              <span className="font-mono text-sm truncate">{name}</span>
+                              <span className="font-mono text-[10px] text-muted-foreground/50 hidden sm:inline">
+                                {truncateAddress(token.mint)}
+                              </span>
+                            </div>
+                            {/* Mobile: verification inline */}
+                            <span className={cn(
+                              "font-mono text-[9px] uppercase tracking-wider md:hidden",
+                              verificationLevel === 'strict' || verificationLevel === 'verified'
+                                ? "text-foreground/40"
+                                : "text-muted-foreground/30"
+                            )}>
+                              {verificationLevel}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Verification - desktop */}
+                        <div className="hidden md:block">
+                          <span className={cn(
+                            "font-mono text-[10px] uppercase tracking-wider",
+                            verificationLevel === 'strict' || verificationLevel === 'verified'
+                              ? "text-foreground/50"
+                              : "text-muted-foreground/30"
+                          )}>
+                            {verificationLevel}
+                          </span>
+                        </div>
+
+                        {/* Balance - desktop */}
+                        <div className="hidden md:block text-right">
+                          <span className="font-mono text-xs tabular-nums">
+                            {token.amount?.toLocaleString() || '0'}
+                          </span>
+                        </div>
+
+                        {/* Value */}
+                        <div className="text-right">
+                          <span className={cn(
+                            "font-mono text-xs tabular-nums",
+                            usdValue !== null && usdValue < dustThresholdUsd && "text-muted-foreground"
+                          )}>
+                            {usdValue !== null
+                              ? formatPrice(usdValue)
+                              : token.priceFetched ? '--' : '...'}
+                          </span>
+                          {/* Mobile: balance underneath */}
+                          <span className="block md:hidden font-mono text-[10px] text-muted-foreground/50 tabular-nums">
+                            {token.amount?.toLocaleString() || '0'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Execution detail row */}
+                      {execution && (
+                        <div
+                          className="py-2.5 pl-[44px] pr-1 border-b border-border/20 font-mono text-[11px] text-muted-foreground flex items-center gap-2.5 bg-muted/30"
+                          style={{ animation: 'fadeIn 0.2s ease-out' }}
+                        >
+                          <Badge variant={executionBadgeVariant(execution.state)}>
+                            {executionLabel(execution.state)}
+                          </Badge>
+                          <span className="truncate">{execution.message}</span>
+                          {txUrl && (
+                            <a
+                              href={txUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="shrink-0 underline underline-offset-2 hover:text-foreground transition-colors"
+                            >
+                              view tx
+                            </a>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="py-32 flex flex-col items-center gap-3">
+                <span className="font-mono text-xs text-muted-foreground">No tokens found in this wallet.</span>
+              </div>
+            )}
+
+            {/* Bottom padding */}
+            <div className="h-24" />
           </div>
-        </div>
+        ) : (
+          /* ─── Disconnected: Swiss poster ───────────────────── */
+          <div
+            className="max-w-[1000px] mx-auto px-6 flex flex-col justify-center min-h-[calc(100vh-49px)]"
+            style={{ animation: 'fadeUp 0.5s ease-out' }}
+          >
+            <div className="max-w-[700px]">
+              <div
+                className="w-12 h-px bg-foreground/30 mb-10"
+                style={{ animation: 'slideRight 0.6s ease-out 0.2s both' }}
+              />
+              <h1 className="font-serif italic text-[clamp(3rem,10vw,7rem)] leading-[0.9] tracking-tight mb-8">
+                Sweep your<br />
+                dust to SOL
+              </h1>
+              <p className="font-mono text-sm text-muted-foreground max-w-[380px] leading-relaxed mb-12">
+                Connect your wallet. Select the tokens worth less than you
+                care about. Sell them all to SOL in one batch.
+              </p>
+              <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground/60">
+                <ArrowRight className="h-3 w-3" />
+                <span>Connect wallet to begin</span>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </>
   )

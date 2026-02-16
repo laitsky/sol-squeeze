@@ -3,26 +3,32 @@
 @tailwind utilities;
 
 :root {
-  --background: 222.2 84% 4.9%;
-  --foreground: 210 40% 98%;
-  --card: 220 30% 8%;
-  --card-foreground: 210 40% 98%;
-  --popover: 220 30% 8%;
-  --popover-foreground: 210 40% 98%;
-  --primary: 330 45% 55%;
-  --primary-foreground: 210 40% 98%;
-  --secondary: 217.2 32.6% 17.5%;
-  --secondary-foreground: 210 40% 98%;
-  --muted: 217.2 32.6% 17.5%;
-  --muted-foreground: 215 20.2% 65.1%;
-  --accent: 330 45% 55%;
-  --accent-foreground: 210 40% 98%;
-  --destructive: 0 62.8% 30.6%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 217.2 32.6% 17.5%;
-  --input: 217.2 32.6% 17.5%;
-  --ring: 330 45% 55%;
-  --radius: 0.75rem;
+  --background: 0 0% 3%;
+  --foreground: 0 0% 93%;
+  --card: 0 0% 6%;
+  --card-foreground: 0 0% 93%;
+  --popover: 0 0% 6%;
+  --popover-foreground: 0 0% 93%;
+  --primary: 0 0% 93%;
+  --primary-foreground: 0 0% 3%;
+  --secondary: 0 0% 10%;
+  --secondary-foreground: 0 0% 80%;
+  --muted: 0 0% 10%;
+  --muted-foreground: 0 0% 45%;
+  --accent: 0 0% 15%;
+  --accent-foreground: 0 0% 93%;
+  --destructive: 0 70% 50%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 14%;
+  --input: 0 0% 14%;
+  --ring: 0 0% 60%;
+  --radius: 0px;
+
+  /* Functional status colors - only place color is used */
+  --status-success: 142 71% 45%;
+  --status-error: 0 72% 51%;
+  --status-warning: 38 92% 50%;
+  --status-info: 0 0% 60%;
 }
 
 @layer base {
@@ -30,11 +36,114 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
-    font-family: "SF Pro Text", "SF Pro Display", "Segoe UI", "Inter", "Helvetica Neue", "Arial", sans-serif;
+    @apply bg-background text-foreground antialiased;
   }
 }
 
 html {
   color-scheme: dark;
+}
+
+/* Text selection */
+::selection {
+  background: hsl(var(--foreground) / 0.12);
+}
+
+/* Focus visible */
+:focus-visible {
+  outline: 1px solid hsl(var(--foreground) / 0.4);
+  outline-offset: 2px;
+}
+
+/* Scrollbar - minimal */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 20%);
+}
+
+/* Entrance animations */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideRight {
+  from { transform: scaleX(0); transform-origin: left; }
+  to { transform: scaleX(1); transform-origin: left; }
+}
+
+@keyframes progressPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* Number input - hide spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Solana wallet button overrides - make it fit the brutalist system */
+.wallet-adapter-button {
+  background: hsl(var(--foreground)) !important;
+  color: hsl(var(--background)) !important;
+  border-radius: 0 !important;
+  font-size: 0.75rem !important;
+  height: 2rem !important;
+  padding: 0 0.75rem !important;
+  font-weight: 500 !important;
+  font-family: var(--font-mono), ui-monospace, monospace !important;
+  letter-spacing: 0.02em !important;
+  text-transform: uppercase !important;
+  transition: opacity 0.15s ease !important;
+}
+.wallet-adapter-button:hover {
+  opacity: 0.8 !important;
+}
+.wallet-adapter-button-trigger {
+  background: hsl(var(--foreground)) !important;
+}
+.wallet-adapter-dropdown-list {
+  background: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border)) !important;
+  border-radius: 0 !important;
+}
+.wallet-adapter-dropdown-list-item {
+  background: transparent !important;
+  color: hsl(var(--foreground)) !important;
+  font-family: var(--font-mono), ui-monospace, monospace !important;
+  font-size: 0.75rem !important;
+}
+.wallet-adapter-dropdown-list-item:hover {
+  background: hsl(var(--accent)) !important;
+}
+.wallet-adapter-modal-wrapper {
+  background: hsl(var(--card)) !important;
+  border: 1px solid hsl(var(--border)) !important;
+  border-radius: 0 !important;
 }
