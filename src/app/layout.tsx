@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Instrument_Serif, JetBrains_Mono, Inter } from "next/font/google";
+import { Instrument_Serif, Azeret_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
 
@@ -10,7 +10,7 @@ const instrumentSerif = Instrument_Serif({
   display: "swap",
 });
 
-const jetbrainsMono = JetBrains_Mono({
+const azeretMono = Azeret_Mono({
   subsets: ["latin"],
   variable: "--font-mono",
   display: "swap",
@@ -34,7 +34,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} ${jetbrainsMono.variable} ${instrumentSerif.variable} font-sans`}>
+      <body className={`${inter.variable} ${azeretMono.variable} ${instrumentSerif.variable} font-sans`}>
         <Providers>
           {children}
         </Providers>

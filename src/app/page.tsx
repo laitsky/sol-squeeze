@@ -774,7 +774,7 @@ export default function Home() {
                               "font-mono text-[9px] uppercase tracking-wider md:hidden",
                               verificationLevel === 'strict' || verificationLevel === 'verified'
                                 ? "text-foreground/40"
-                                : "text-muted-foreground/30"
+                                : "text-muted-foreground/60"
                             )}>
                               {verificationLevel}
                             </span>
@@ -787,7 +787,7 @@ export default function Home() {
                             "font-mono text-[10px] uppercase tracking-wider",
                             verificationLevel === 'strict' || verificationLevel === 'verified'
                               ? "text-foreground/50"
-                              : "text-muted-foreground/30"
+                              : "text-muted-foreground/60"
                           )}>
                             {verificationLevel}
                           </span>
