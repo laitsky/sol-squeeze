@@ -108,36 +108,50 @@ input[type="number"] {
   -moz-appearance: textfield;
 }
 
-/* Solana wallet button overrides - make it fit the brutalist system */
+/* Solana wallet adapter overrides */
 .wallet-adapter-button {
-  background: hsl(var(--foreground)) !important;
-  color: hsl(var(--background)) !important;
+  background: transparent !important;
+  color: hsl(var(--foreground)) !important;
+  border: 1px solid hsl(var(--border)) !important;
   border-radius: 0 !important;
   font-size: 0.75rem !important;
   height: 2rem !important;
   padding: 0 0.75rem !important;
-  font-weight: 500 !important;
+  font-weight: 400 !important;
   font-family: var(--font-mono), ui-monospace, monospace !important;
-  letter-spacing: 0.02em !important;
+  letter-spacing: 0.04em !important;
   text-transform: uppercase !important;
-  transition: opacity 0.15s ease !important;
+  transition: background 0.15s ease, border-color 0.15s ease !important;
 }
 .wallet-adapter-button:hover {
-  opacity: 0.8 !important;
+  background: hsl(var(--accent)) !important;
+  border-color: hsl(var(--foreground) / 0.2) !important;
 }
 .wallet-adapter-button-trigger {
-  background: hsl(var(--foreground)) !important;
+  background: transparent !important;
+}
+.wallet-adapter-button-start-icon {
+  width: 16px !important;
+  height: 16px !important;
+  margin-right: 6px !important;
+}
+.wallet-adapter-dropdown {
+  z-index: 100 !important;
 }
 .wallet-adapter-dropdown-list {
   background: hsl(var(--card)) !important;
   border: 1px solid hsl(var(--border)) !important;
   border-radius: 0 !important;
+  padding: 4px 0 !important;
+  margin-top: 4px !important;
 }
 .wallet-adapter-dropdown-list-item {
   background: transparent !important;
   color: hsl(var(--foreground)) !important;
   font-family: var(--font-mono), ui-monospace, monospace !important;
   font-size: 0.75rem !important;
+  border-radius: 0 !important;
+  padding: 8px 12px !important;
 }
 .wallet-adapter-dropdown-list-item:hover {
   background: hsl(var(--accent)) !important;
@@ -146,4 +160,31 @@ input[type="number"] {
   background: hsl(var(--card)) !important;
   border: 1px solid hsl(var(--border)) !important;
   border-radius: 0 !important;
+}
+.wallet-adapter-modal-title {
+  font-family: var(--font-mono), ui-monospace, monospace !important;
+  font-size: 0.875rem !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;
+  color: hsl(var(--foreground)) !important;
+}
+.wallet-adapter-modal-list .wallet-adapter-button {
+  border: none !important;
+  height: 2.5rem !important;
+  padding: 0 12px !important;
+}
+.wallet-adapter-modal-list .wallet-adapter-button:hover {
+  background: hsl(var(--accent)) !important;
+  border: none !important;
+}
+.wallet-adapter-modal-button-close {
+  background: transparent !important;
+  color: hsl(var(--muted-foreground)) !important;
+}
+.wallet-adapter-modal-button-close:hover {
+  color: hsl(var(--foreground)) !important;
+}
+.wallet-adapter-modal-overlay {
+  background: hsl(0 0% 0% / 0.6) !important;
 }

@@ -10,6 +10,7 @@ interface JupiterQuoteRequest {
   restrictIntermediateTokens?: boolean
   cacheTtlMs?: number
   forceRefresh?: boolean
+  signal?: AbortSignal
 }
 
 interface JupiterSwapRequest {
@@ -124,6 +125,7 @@ export async function getJupiterQuote({
   restrictIntermediateTokens = true,
   cacheTtlMs = 15_000,
   forceRefresh = false,
+  signal,
 }: JupiterQuoteRequest): Promise<Record<string, unknown>> {
   const cacheKey = `${inputMint}:${outputMint}:${amount}:${slippageBps}:${restrictIntermediateTokens}`
   const now = Date.now()
@@ -147,6 +149,7 @@ export async function getJupiterQuote({
   const response = await fetch(`${baseUrl}/swap/v1/quote?${params.toString()}`, {
     method: 'GET',
     headers: getJupiterHeaders(),
+    signal,
   })
 
   const payload = await response.json()

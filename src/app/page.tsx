@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { Connection } from '@solana/web3.js'
 import { Loader2, ArrowRight } from 'lucide-react'
@@ -143,6 +143,7 @@ export default function Home() {
   const { publicKey, connected, sendTransaction } = useWallet()
   const [tokens, setTokens] = useState<Token[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [selectedMints, setSelectedMints] = useState<Set<string>>(new Set())
   const [isSelling, setIsSelling] = useState(false)
   const [sellResults, setSellResults] = useState<Record<string, ExecutionResult>>({})
@@ -156,11 +157,14 @@ export default function Home() {
     loading: false,
     error: null,
   })
+  const fetchControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     if (connected && publicKey) {
       fetchTokens(publicKey.toBase58())
     } else {
+      // Cancel in-flight fetch on disconnect
+      fetchControllerRef.current?.abort()
       setTokens([])
       setSelectedMints(new Set())
       setSellResults({})
@@ -219,11 +223,11 @@ export default function Home() {
     }
 
     const ESTIMATE_MAX_TOKENS = 25
-    const ESTIMATE_CONCURRENCY = 4
+    const ESTIMATE_CONCURRENCY = 6
     const estimateTokens = selectedTokens.slice(0, ESTIMATE_MAX_TOKENS)
     const skippedCount = Math.max(0, selectedTokens.length - estimateTokens.length)
 
-    let cancelled = false
+    const controller = new AbortController()
     const timeoutId = setTimeout(async () => {
       setSellEstimate(prev => ({
         ...prev,
@@ -235,6 +239,10 @@ export default function Home() {
         estimateTokens,
         ESTIMATE_CONCURRENCY,
         async (token) => {
+          if (controller.signal.aborted) {
+            return { outLamports: BigInt(0), quoted: false, failed: true }
+          }
+
           const decimals = token.metadata?.decimals ?? 0
           const rawAmount = toRawAmount(token.amount, decimals)
 
@@ -248,6 +256,7 @@ export default function Home() {
               outputMint: SOL_MINT,
               amount: rawAmount,
               slippageBps: 100,
+              signal: controller.signal,
             })
 
             const outAmountRaw = getQuoteOutAmountRaw(quoteResponse)
@@ -262,6 +271,8 @@ export default function Home() {
         }
       )
 
+      if (controller.signal.aborted) return
+
       let totalOutLamports = BigInt(0)
       let quotedCount = 0
       let failedCount = 0
@@ -269,10 +280,6 @@ export default function Home() {
         totalOutLamports += result.outLamports
         if (result.quoted) quotedCount += 1
         if (result.failed) failedCount += 1
-      }
-
-      if (cancelled) {
-        return
       }
 
       const numericOut = Number(totalOutLamports)
@@ -287,25 +294,50 @@ export default function Home() {
     }, 400)
 
     return () => {
-      cancelled = true
+      controller.abort()
       clearTimeout(timeoutId)
     }
   }, [connected, isSelling, selectedMints, tokens])
 
   async function fetchTokens(walletAddress: string) {
+    // Cancel any in-flight fetch
+    fetchControllerRef.current?.abort()
+    const controller = new AbortController()
+    fetchControllerRef.current = controller
+
     setLoading(true)
+    setLoadingMore(false)
 
     try {
-      const fetchedTokens: Token[] = await fetchWalletTokenBalances(walletAddress)
+      const fetchedTokens: Token[] = await fetchWalletTokenBalances(walletAddress, {
+        signal: controller.signal,
+        onFirstPage: (firstPageTokens) => {
+          if (controller.signal.aborted) return
+          const walletTokens = firstPageTokens.map(token => ({
+            ...token,
+            isVerified: isTokenVerified(token.metadata || null),
+          }))
+          setTokens(sortTokensByVerificationAndValue([...walletTokens]))
+          // Show first page immediately, switch to "loading more" indicator
+          setLoading(false)
+          setLoadingMore(true)
+        },
+      })
+      if (controller.signal.aborted) return
       const walletTokens = fetchedTokens.map(token => ({
         ...token,
         isVerified: isTokenVerified(token.metadata || null),
       }))
-      setTokens(sortTokensByVerificationAndValue(walletTokens))
+      setTokens(sortTokensByVerificationAndValue([...walletTokens]))
     } catch (error) {
-      console.error('Error fetching tokens:', error)
+      if (!controller.signal.aborted) {
+        console.error('Error fetching tokens:', error)
+      }
     } finally {
-      setLoading(false)
+      if (!controller.signal.aborted) {
+        setLoading(false)
+        setLoadingMore(false)
+      }
     }
   }
 
@@ -814,6 +846,14 @@ export default function Home() {
             ) : (
               <div className="py-32 flex flex-col items-center gap-3">
                 <span className="font-mono text-xs text-muted-foreground">No tokens found in this wallet.</span>
+              </div>
+            )}
+
+            {/* Loading more indicator */}
+            {loadingMore && (
+              <div className="py-4 flex items-center justify-center gap-2 font-mono text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>Loading more tokens...</span>
               </div>
             )}
 

@@ -5,7 +5,7 @@ const WalletMultiButtonDynamic = dynamic(
   () => import('@solana/wallet-adapter-react-ui').then((mod) => mod.WalletMultiButton),
   {
     ssr: false,
-    loading: () => <div className="h-8 w-28 bg-muted" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(0 0% 15%) 50%, transparent 100%)' }} />
+    loading: () => <div className="h-8 w-28 border border-border" />
   }
 )
 
