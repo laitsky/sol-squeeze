@@ -31,6 +31,7 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: "SF Pro Text", "SF Pro Display", "Segoe UI", "Inter", "Helvetica Neue", "Arial", sans-serif;
   }
 }
 
