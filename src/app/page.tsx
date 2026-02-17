@@ -111,6 +111,7 @@ const VERIFICATION_PRIORITY: Record<string, number> = {
 const SIGNING_BATCH_SIZE = 6
 const ESTIMATE_QUOTE_TTL_MS = 15_000
 const RECENT_ACTIVITY_STORAGE_KEY = 'sol-vacuum-recent-activity-v1'
+const DEFAULT_DUST_THRESHOLD_USD = 5
 
 function isSellableToken(token: Token): boolean {
   return token.amount > 0 && token.mint !== SOL_MINT
@@ -344,7 +345,7 @@ export function Home() {
   const [sellResults, setSellResults] = useState<Record<string, ExecutionResult>>({})
   const [sellSummary, setSellSummary] = useState<SellSummary | null>(null)
   const [globalError, setGlobalError] = useState<string | null>(null)
-  const [dustThresholdUsd, setDustThresholdUsd] = useState(5)
+  const [dustThresholdUsdInput, setDustThresholdUsdInput] = useState(String(DEFAULT_DUST_THRESHOLD_USD))
   const [activeSellTargetCount, setActiveSellTargetCount] = useState(0)
   const [currentRunMints, setCurrentRunMints] = useState<Set<string>>(new Set())
   const [estimateRefreshNonce, setEstimateRefreshNonce] = useState(0)
@@ -361,6 +362,12 @@ export function Home() {
   const [recentActivity, setRecentActivity] = useState<RecentActivityItem[]>([])
   const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([])
   const [hasHydratedStorage, setHasHydratedStorage] = useState(false)
+
+  const dustThresholdUsd = useMemo(() => {
+    const parsed = Number(dustThresholdUsdInput)
+    if (!Number.isFinite(parsed)) return 0
+    return Math.max(0, parsed)
+  }, [dustThresholdUsdInput])
 
   const [sellEstimate, setSellEstimate] = useState<SellEstimate>({
     totalOutLamports: null,
@@ -1410,10 +1417,15 @@ export function Home() {
                     type="number"
                     min="0"
                     step="0.01"
-                    value={dustThresholdUsd}
-                    onChange={(e) => {
-                      const v = Number(e.target.value)
-                      setDustThresholdUsd(Number.isFinite(v) ? v : 0)
+                    value={dustThresholdUsdInput}
+                    onChange={(e) => setDustThresholdUsdInput(e.target.value)}
+                    onBlur={() => {
+                      const parsed = Number(dustThresholdUsdInput)
+                      if (!Number.isFinite(parsed)) {
+                        setDustThresholdUsdInput(String(DEFAULT_DUST_THRESHOLD_USD))
+                        return
+                      }
+                      setDustThresholdUsdInput(String(Math.max(0, parsed)))
                     }}
                     disabled={isSelling}
                     className="w-12 bg-transparent text-xs font-mono text-foreground focus:outline-none disabled:opacity-40 tabular-nums"
