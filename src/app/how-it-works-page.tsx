@@ -7,7 +7,7 @@ export function HowItWorksPage() {
       <main className="min-h-[calc(100vh-49px)] px-6 py-14">
         <div className="max-w-[1000px] mx-auto">
           <div className="max-w-[760px]">
-            <div className="w-12 h-px bg-foreground/30 mb-10" />
+            <div className="w-12 h-px bg-primary/50 mb-10" />
             <h1 className="font-serif italic text-[clamp(2.4rem,8vw,5rem)] leading-[0.95] tracking-tight mb-6">
               How Sol Squeeze<br />
               works

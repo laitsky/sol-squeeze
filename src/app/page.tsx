@@ -1341,7 +1341,7 @@ export function Home() {
                   void confirmSellSelectedTokens()
                 }}
                 disabled={isSelling || selectedSellableCount === 0}
-                className="h-8 px-3 bg-foreground text-background text-[11px] uppercase tracking-wider hover:opacity-85 transition-opacity disabled:opacity-30"
+                className="h-8 px-3 bg-primary text-primary-foreground text-[11px] uppercase tracking-wider hover:bg-[hsl(var(--primary-hover))] transition-colors disabled:opacity-30"
               >
                 proceed
               </button>
@@ -1581,9 +1581,9 @@ export function Home() {
                   disabled={isSelling || selectedSellableCount === 0}
                   className={cn(
                     'h-8 px-4 text-xs font-mono uppercase tracking-wider transition-all inline-flex items-center gap-2',
-                    'bg-foreground text-background',
+                    'bg-primary text-primary-foreground',
                     selectedSellableCount > 0 && !isSelling
-                      ? 'hover:opacity-80 active:scale-[0.98]'
+                      ? 'hover:bg-[hsl(var(--primary-hover))] active:scale-[0.98]'
                       : '',
                     'disabled:opacity-15'
                   )}
@@ -1605,7 +1605,7 @@ export function Home() {
                     {isSelling ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-foreground" />
                     ) : (
-                      <span className="inline-block h-2 w-2 bg-foreground/30" />
+                      <span className="inline-block h-2 w-2 bg-primary/30" />
                     )}
                     <span>
                       {isSelling
@@ -1624,7 +1624,7 @@ export function Home() {
                   <>
                     <div className="mt-3 h-1 bg-border relative overflow-hidden">
                       <div
-                        className="h-full bg-foreground transition-all duration-700 ease-out"
+                        className="h-full bg-primary transition-all duration-700 ease-out"
                         style={{ width: `${sellProgress}%` }}
                       />
                     </div>
@@ -1699,8 +1699,8 @@ export function Home() {
                 className="py-5 border-b border-border"
                 style={{ animation: 'fadeUp 0.35s ease-out' }}
               >
-                <div className="relative overflow-hidden border border-[hsl(var(--status-success))]/35 bg-[linear-gradient(132deg,hsl(var(--status-success)/0.24)_0%,hsl(var(--background))_58%,hsl(var(--foreground)/0.08)_100%)] p-4 sm:p-5">
-                  <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-[hsl(var(--status-success))]/20 blur-2xl" />
+                <div className="relative overflow-hidden border border-[hsl(var(--primary))]/35 bg-[linear-gradient(132deg,hsl(var(--primary)/0.24)_0%,hsl(var(--background))_58%,hsl(var(--foreground)/0.08)_100%)] p-4 sm:p-5">
+                  <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-[hsl(var(--primary))]/20 blur-2xl" />
                   <div className="pointer-events-none absolute -left-10 bottom-0 h-20 w-20 rounded-full bg-foreground/10 blur-xl" />
 
                   <div className="relative flex flex-wrap items-center justify-between gap-2">
@@ -1823,7 +1823,7 @@ export function Home() {
                           className={cn(
                             'grid grid-cols-[32px_1fr_90px] md:grid-cols-[32px_1fr_80px_100px_90px] gap-3 items-center py-3 border-b border-border/40 transition-all duration-150',
                             selected
-                              ? 'bg-foreground/[0.04] border-l-2 border-l-foreground pl-2.5 md:pl-0.5'
+                              ? 'bg-foreground/[0.04] border-l-2 border-l-primary pl-2.5 md:pl-0.5'
                               : 'border-l-2 border-l-transparent pl-2.5 md:pl-0.5',
                             sellable && !isSelling && 'hover:bg-foreground/[0.025] cursor-pointer'
                           )}
@@ -1834,7 +1834,7 @@ export function Home() {
                               className={cn(
                                 'w-4 h-4 border flex items-center justify-center transition-all duration-150',
                                 selected
-                                  ? 'border-foreground bg-foreground'
+                                  ? 'border-primary bg-primary'
                                   : 'border-muted-foreground/25 hover:border-muted-foreground/50',
                                 isSelling && 'opacity-40'
                               )}
@@ -1973,7 +1973,7 @@ export function Home() {
           >
             <div className="max-w-[700px]">
               <div
-                className="w-12 h-px bg-foreground/30 mb-10"
+                className="w-12 h-px bg-primary/50 mb-10"
                 style={{ animation: 'slideRight 0.6s ease-out 0.2s both' }}
               />
               <h1 className="font-serif italic text-[clamp(3rem,10vw,7rem)] leading-[0.9] tracking-tight mb-8">

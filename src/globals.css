@@ -3,31 +3,32 @@
 @tailwind utilities;
 
 :root {
-  --background: 0 0% 3%;
+  --background: 0 0% 11%;
   --foreground: 0 0% 93%;
-  --card: 0 0% 6%;
+  --card: 0 0% 14%;
   --card-foreground: 0 0% 93%;
-  --popover: 0 0% 6%;
+  --popover: 0 0% 14%;
   --popover-foreground: 0 0% 93%;
-  --primary: 0 0% 93%;
+  --primary: 24 95% 53%;
   --primary-foreground: 0 0% 3%;
-  --secondary: 0 0% 10%;
+  --primary-hover: 24 95% 46%;
+  --secondary: 0 0% 16%;
   --secondary-foreground: 0 0% 80%;
-  --muted: 0 0% 10%;
-  --muted-foreground: 0 0% 45%;
-  --accent: 0 0% 15%;
+  --muted: 0 0% 16%;
+  --muted-foreground: 0 0% 50%;
+  --accent: 24 50% 16%;
   --accent-foreground: 0 0% 93%;
   --destructive: 0 70% 50%;
   --destructive-foreground: 0 0% 98%;
-  --border: 0 0% 14%;
-  --input: 0 0% 14%;
-  --ring: 0 0% 60%;
+  --border: 0 0% 20%;
+  --input: 0 0% 20%;
+  --ring: 24 95% 53%;
   --radius: 0px;
 
   /* Functional status colors - only place color is used */
   --status-success: 142 71% 45%;
   --status-error: 0 72% 51%;
-  --status-warning: 38 92% 50%;
+  --status-warning: 48 96% 53%;
   --status-info: 0 0% 60%;
 }
 
@@ -46,12 +47,12 @@ html {
 
 /* Text selection */
 ::selection {
-  background: hsl(var(--foreground) / 0.12);
+  background: hsl(var(--primary) / 0.15);
 }
 
 /* Focus visible */
 :focus-visible {
-  outline: 1px solid hsl(var(--foreground) / 0.4);
+  outline: 1px solid hsl(var(--primary) / 0.5);
   outline-offset: 2px;
 }
 
@@ -63,7 +64,7 @@ html {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: hsl(0 0% 20%);
+  background: hsl(0 0% 18%);
 }
 
 /* Entrance animations */

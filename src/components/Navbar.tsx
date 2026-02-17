@@ -35,7 +35,7 @@ export default function Navbar() {
             href="/"
             className={cn(
               'font-mono text-[11px] uppercase tracking-wider transition-colors',
-              currentPath === '/' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
+              currentPath === '/' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
             )}
           >
             Home
@@ -44,7 +44,7 @@ export default function Navbar() {
             href="/how-it-works"
             className={cn(
               'font-mono text-[11px] uppercase tracking-wider transition-colors',
-              currentPath === '/how-it-works' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
+              currentPath === '/how-it-works' ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
             )}
           >
             How it works
