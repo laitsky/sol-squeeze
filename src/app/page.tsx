@@ -59,6 +59,7 @@ interface SellEstimate {
   skippedCount: number
   loading: boolean
   error: string | null
+  lastUpdatedAt: number | null
 }
 
 interface SellSummary {
@@ -81,6 +82,26 @@ interface ToastItem {
   onAction?: () => void
 }
 
+type TokenPreference = 'always' | 'never'
+
+interface RecentActivityItem {
+  id: string
+  signature: string
+  mint: string
+  tokenLabel: string
+  tokenAmount: number
+  timestamp: number
+}
+
+interface ProgressEvent {
+  id: number
+  mint: string
+  tokenLabel: string
+  state: ExecutionState
+  message: string
+  timestamp: number
+}
+
 const VERIFICATION_PRIORITY: Record<string, number> = {
   strict: 1,
   verified: 2,
@@ -89,6 +110,9 @@ const VERIFICATION_PRIORITY: Record<string, number> = {
 }
 
 const SIGNING_BATCH_SIZE = 6
+const ESTIMATE_QUOTE_TTL_MS = 15_000
+const RECENT_ACTIVITY_STORAGE_KEY = 'sol-vacuum-recent-activity-v1'
+const TOKEN_PREFERENCES_STORAGE_KEY = 'sol-vacuum-token-preferences-v1'
 
 function isSellableToken(token: Token): boolean {
   return token.amount > 0 && token.mint !== SOL_MINT
@@ -146,6 +170,30 @@ function formatSolEstimate(totalOutLamports: bigint | null): string {
   if (totalOutLamports <= BigInt(0)) return '0'
   if (totalOutLamports < BigInt(1_000)) return '<0.000001'
   return formatLamportsAsSol(totalOutLamports, 6)
+}
+
+function formatQuoteAgeLabel(lastUpdatedAt: number | null, nowMs: number): string {
+  if (!lastUpdatedAt) return 'quote not ready'
+  const ageSec = Math.max(0, Math.floor((nowMs - lastUpdatedAt) / 1000))
+  const ttlLeftSec = Math.max(0, Math.ceil((ESTIMATE_QUOTE_TTL_MS - (nowMs - lastUpdatedAt)) / 1000))
+  return `age ${ageSec}s • cache ${ttlLeftSec}s`
+}
+
+function formatTimeAgo(timestamp: number, nowMs: number): string {
+  const seconds = Math.max(0, Math.floor((nowMs - timestamp) / 1000))
+  if (seconds < 60) {
+    return `${seconds}s ago`
+  }
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) {
+    return `${minutes}m ago`
+  }
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) {
+    return `${hours}h ago`
+  }
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
 }
 
 async function mapWithConcurrency<T, R>(
@@ -293,11 +341,15 @@ export function Home() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [selectedMints, setSelectedMints] = useState<Set<string>>(new Set())
   const [isSelling, setIsSelling] = useState(false)
+  const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false)
   const [sellResults, setSellResults] = useState<Record<string, ExecutionResult>>({})
   const [sellSummary, setSellSummary] = useState<SellSummary | null>(null)
   const [globalError, setGlobalError] = useState<string | null>(null)
   const [dustThresholdUsd, setDustThresholdUsd] = useState(5)
   const [activeSellTargetCount, setActiveSellTargetCount] = useState(0)
+  const [currentRunMints, setCurrentRunMints] = useState<Set<string>>(new Set())
+  const [estimateRefreshNonce, setEstimateRefreshNonce] = useState(0)
+  const [nowMs, setNowMs] = useState(Date.now())
 
   const [slippagePreset, setSlippagePreset] = useState<SlippagePreset>('1')
   const [customSlippagePercent, setCustomSlippagePercent] = useState('1')
@@ -307,6 +359,10 @@ export function Home() {
   const [sortBy, setSortBy] = useState<TokenSort>('verification')
 
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  const [recentActivity, setRecentActivity] = useState<RecentActivityItem[]>([])
+  const [tokenPreferences, setTokenPreferences] = useState<Record<string, TokenPreference>>({})
+  const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([])
+  const [hasHydratedStorage, setHasHydratedStorage] = useState(false)
 
   const [sellEstimate, setSellEstimate] = useState<SellEstimate>({
     totalOutLamports: null,
@@ -315,10 +371,13 @@ export function Home() {
     skippedCount: 0,
     loading: false,
     error: null,
+    lastUpdatedAt: null,
   })
 
   const fetchControllerRef = useRef<AbortController | null>(null)
   const toastCounterRef = useRef(0)
+  const progressCounterRef = useRef(0)
+  const estimateForceRefreshRef = useRef(false)
   const walletConnectedRef = useRef(connected)
   const walletAddressRef = useRef(publicKey?.toBase58() || null)
 
@@ -326,6 +385,60 @@ export function Home() {
     walletConnectedRef.current = connected
     walletAddressRef.current = publicKey?.toBase58() || null
   }, [connected, publicKey])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNowMs(Date.now())
+    }, 1000)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      const storedActivity = localStorage.getItem(RECENT_ACTIVITY_STORAGE_KEY)
+      if (storedActivity) {
+        const parsed = JSON.parse(storedActivity) as RecentActivityItem[]
+        if (Array.isArray(parsed)) {
+          setRecentActivity(parsed.filter(item => item && typeof item.signature === 'string').slice(0, 30))
+        }
+      }
+    } catch {
+      setRecentActivity([])
+    }
+
+    try {
+      const storedPreferences = localStorage.getItem(TOKEN_PREFERENCES_STORAGE_KEY)
+      if (storedPreferences) {
+        const parsed = JSON.parse(storedPreferences) as Record<string, TokenPreference>
+        if (parsed && typeof parsed === 'object') {
+          const nextPreferences: Record<string, TokenPreference> = {}
+          for (const [mint, value] of Object.entries(parsed)) {
+            if (value === 'always' || value === 'never') {
+              nextPreferences[mint] = value
+            }
+          }
+          setTokenPreferences(nextPreferences)
+        }
+      }
+    } catch {
+      setTokenPreferences({})
+    }
+
+    setHasHydratedStorage(true)
+  }, [])
+
+  useEffect(() => {
+    if (!hasHydratedStorage) return
+    localStorage.setItem(RECENT_ACTIVITY_STORAGE_KEY, JSON.stringify(recentActivity))
+  }, [recentActivity, hasHydratedStorage])
+
+  useEffect(() => {
+    if (!hasHydratedStorage) return
+    localStorage.setItem(TOKEN_PREFERENCES_STORAGE_KEY, JSON.stringify(tokenPreferences))
+  }, [tokenPreferences, hasHydratedStorage])
 
   function removeToast(id: number) {
     setToasts(prev => prev.filter(toast => toast.id !== id))
@@ -351,6 +464,70 @@ export function Home() {
     }, 7000)
   }
 
+  function tokenPreferenceForMint(mint: string): TokenPreference | null {
+    return tokenPreferences[mint] || null
+  }
+
+  function isNeverSellMint(mint: string): boolean {
+    return tokenPreferenceForMint(mint) === 'never'
+  }
+
+  function setTokenPreference(mint: string, preference: TokenPreference | null) {
+    setTokenPreferences(prev => {
+      const next = { ...prev }
+      if (!preference) {
+        delete next[mint]
+      } else {
+        next[mint] = preference
+      }
+      return next
+    })
+  }
+
+  function appendProgressEvent(mint: string, state: ExecutionState, message: string) {
+    const token = tokens.find(item => item.mint === mint)
+    const entry: ProgressEvent = {
+      id: progressCounterRef.current,
+      mint,
+      tokenLabel: token ? tokenLabel(token) : truncateAddress(mint),
+      state,
+      message,
+      timestamp: Date.now(),
+    }
+
+    progressCounterRef.current += 1
+    setProgressEvents(prev => [...prev, entry].slice(-40))
+  }
+
+  function appendBatchProgressEvent(message: string) {
+    const entry: ProgressEvent = {
+      id: progressCounterRef.current,
+      mint: 'batch',
+      tokenLabel: 'Batch',
+      state: 'building',
+      message,
+      timestamp: Date.now(),
+    }
+
+    progressCounterRef.current += 1
+    setProgressEvents(prev => [...prev, entry].slice(-40))
+  }
+
+  function addRecentActivity(entry: Omit<RecentActivityItem, 'id' | 'timestamp'>) {
+    setRecentActivity(prev => {
+      const next: RecentActivityItem[] = [
+        {
+          ...entry,
+          id: `${entry.signature}-${Date.now()}`,
+          timestamp: Date.now(),
+        },
+        ...prev.filter(item => item.signature !== entry.signature),
+      ]
+
+      return next.slice(0, 20)
+    })
+  }
+
   const effectiveSlippageBps = useMemo(
     () => (slippagePreset === 'custom' ? parseSlippageBps(customSlippagePercent) : slippagePresetBps(slippagePreset)),
     [slippagePreset, customSlippagePercent]
@@ -366,16 +543,18 @@ export function Home() {
       setSellResults({})
       setSellSummary(null)
       setGlobalError(null)
+      setIsConfirmModalOpen(false)
+      setCurrentRunMints(new Set())
     }
   }, [connected, publicKey])
 
   useEffect(() => {
     setSelectedMints(prevSelected => {
-      const tokenMints = new Set(tokens.filter(isSellableToken).map(token => token.mint))
+      const tokenMints = new Set(tokens.filter(token => isSellableToken(token) && !isNeverSellMint(token.mint)).map(token => token.mint))
       const nextSelected = new Set(Array.from(prevSelected).filter(mint => tokenMints.has(mint)))
       return nextSelected
     })
-  }, [tokens])
+  }, [tokens, tokenPreferences])
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
 
@@ -408,6 +587,11 @@ export function Home() {
     [visibleTokens]
   )
 
+  const selectableVisibleSellableTokens = useMemo(
+    () => visibleSellableTokens.filter(token => !isNeverSellMint(token.mint)),
+    [visibleSellableTokens, tokenPreferences]
+  )
+
   const totalPortfolioValue = useMemo(() => {
     return tokens.reduce((total, token) => {
       if (token.price && token.amount) {
@@ -417,15 +601,51 @@ export function Home() {
     }, 0)
   }, [tokens])
 
-  const selectedSellableCount = useMemo(
-    () => tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token)).length,
-    [tokens, selectedMints]
+  const selectedTokensForSell = useMemo(
+    () => tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token) && !isNeverSellMint(token.mint)),
+    [tokens, selectedMints, tokenPreferences]
+  )
+
+  const selectedSellableCount = selectedTokensForSell.length
+
+  const currentRunResultCount = useMemo(
+    () => Object.entries(sellResults).filter(([mint]) => currentRunMints.has(mint)).length,
+    [sellResults, currentRunMints]
   )
 
   const sellProgress = useMemo(() => {
     if (!isSelling || activeSellTargetCount === 0) return 0
-    return (Object.keys(sellResults).length / activeSellTargetCount) * 100
-  }, [isSelling, sellResults, activeSellTargetCount])
+    return (currentRunResultCount / activeSellTargetCount) * 100
+  }, [isSelling, currentRunResultCount, activeSellTargetCount])
+
+  const completedSellCount = useMemo(() => {
+    return Object.entries(sellResults).filter(([mint, result]) => (
+      currentRunMints.has(mint) && (result.state === 'confirmed' || result.state === 'failed' || result.state === 'skipped')
+    )).length
+  }, [sellResults, currentRunMints])
+
+  const activeExecutionEntry = useMemo(() => {
+    const entries = Object.entries(sellResults).filter(([mint]) => currentRunMints.has(mint))
+    for (const [mint, result] of entries) {
+      if (result.state === 'awaiting-signature') {
+        const token = tokens.find(item => item.mint === mint)
+        return {
+          tokenLabel: token ? tokenLabel(token) : truncateAddress(mint),
+          state: result.state,
+        }
+      }
+    }
+    for (const [mint, result] of entries) {
+      if (result.state === 'building' || result.state === 'submitted') {
+        const token = tokens.find(item => item.mint === mint)
+        return {
+          tokenLabel: token ? tokenLabel(token) : truncateAddress(mint),
+          state: result.state,
+        }
+      }
+    }
+    return null
+  }, [sellResults, tokens, currentRunMints])
 
   const maxPriorityFeeLamports = useMemo(() => BigInt(getMaxPriorityFeeLamports()), [])
 
@@ -443,8 +663,18 @@ export function Home() {
     return Math.ceil(selectedSellableCount / SIGNING_BATCH_SIZE)
   }, [isBatchSigningSupported, selectedSellableCount])
 
+  const quoteAgeLabel = useMemo(
+    () => formatQuoteAgeLabel(sellEstimate.lastUpdatedAt, nowMs),
+    [sellEstimate.lastUpdatedAt, nowMs]
+  )
+
+  const recentProgressEvents = useMemo(
+    () => [...progressEvents].reverse().slice(0, 8),
+    [progressEvents]
+  )
+
   useEffect(() => {
-    if (!connected || isSelling || selectedMints.size === 0) {
+    if (!connected || isSelling || selectedSellableCount === 0) {
       setSellEstimate({
         totalOutLamports: null,
         quotedCount: 0,
@@ -452,11 +682,12 @@ export function Home() {
         skippedCount: 0,
         loading: false,
         error: null,
+        lastUpdatedAt: null,
       })
       return
     }
 
-    const selectedTokens = tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token))
+    const selectedTokens = selectedTokensForSell
     if (selectedTokens.length === 0) {
       setSellEstimate({
         totalOutLamports: null,
@@ -465,6 +696,7 @@ export function Home() {
         skippedCount: 0,
         loading: false,
         error: null,
+        lastUpdatedAt: null,
       })
       return
     }
@@ -473,6 +705,8 @@ export function Home() {
     const ESTIMATE_CONCURRENCY = 6
     const estimateTokens = selectedTokens.slice(0, ESTIMATE_MAX_TOKENS)
     const skippedCount = Math.max(0, selectedTokens.length - estimateTokens.length)
+    const forceRefresh = estimateForceRefreshRef.current
+    estimateForceRefreshRef.current = false
 
     const controller = new AbortController()
     const timeoutId = setTimeout(async () => {
@@ -503,6 +737,7 @@ export function Home() {
               outputMint: SOL_MINT,
               amount: rawAmount,
               slippageBps: effectiveSlippageBps,
+              forceRefresh,
               signal: controller.signal,
             })
 
@@ -536,6 +771,7 @@ export function Home() {
         skippedCount,
         loading: false,
         error: quotedCount === 0 ? 'No quotes available.' : null,
+        lastUpdatedAt: Date.now(),
       })
     }, 400)
 
@@ -543,7 +779,7 @@ export function Home() {
       controller.abort()
       clearTimeout(timeoutId)
     }
-  }, [connected, isSelling, selectedMints, tokens, effectiveSlippageBps])
+  }, [connected, isSelling, selectedTokensForSell, selectedSellableCount, effectiveSlippageBps, estimateRefreshNonce])
 
   async function fetchTokens(walletAddress: string) {
     fetchControllerRef.current?.abort()
@@ -595,14 +831,19 @@ export function Home() {
     }
   }
 
-  function updateSellResult(mint: string, result: ExecutionResult) {
+  function updateSellResult(mint: string, result: ExecutionResult, logProgress = true) {
     setSellResults(prev => ({
       ...prev,
       [mint]: result,
     }))
+    if (logProgress) {
+      appendProgressEvent(mint, result.state, result.message)
+    }
   }
 
   function toggleMintSelection(mint: string) {
+    if (isNeverSellMint(mint)) return
+
     setSelectedMints(prevSelected => {
       const nextSelected = new Set(prevSelected)
       if (nextSelected.has(mint)) {
@@ -615,7 +856,12 @@ export function Home() {
   }
 
   function selectAllSellable() {
-    setSelectedMints(new Set(visibleSellableTokens.map(token => token.mint)))
+    const alwaysSellMints = visibleSellableTokens
+      .filter(token => tokenPreferenceForMint(token.mint) === 'always')
+      .map(token => token.mint)
+
+    const safeVisibleMints = selectableVisibleSellableTokens.map(token => token.mint)
+    setSelectedMints(new Set([...safeVisibleMints, ...alwaysSellMints]))
   }
 
   function clearSelection() {
@@ -624,14 +870,41 @@ export function Home() {
 
   function autoSelectDustTokens() {
     const threshold = Math.max(0, dustThresholdUsd)
-    const dustMints = visibleSellableTokens
+    const dustMints = selectableVisibleSellableTokens
       .filter(token => {
         const usdValue = tokenValueUsd(token)
         return usdValue !== null && usdValue <= threshold
       })
       .map(token => token.mint)
 
-    setSelectedMints(new Set(dustMints))
+    const alwaysSellMints = selectableVisibleSellableTokens
+      .filter(token => tokenPreferenceForMint(token.mint) === 'always')
+      .map(token => token.mint)
+
+    setSelectedMints(new Set([...dustMints, ...alwaysSellMints]))
+  }
+
+  function refreshEstimate() {
+    if (selectedSellableCount === 0 || sellEstimate.loading || isSelling) return
+    estimateForceRefreshRef.current = true
+    setEstimateRefreshNonce(prev => prev + 1)
+  }
+
+  function setNeverSellPreference(mint: string) {
+    const nextPreference = tokenPreferenceForMint(mint) === 'never' ? null : 'never'
+    setTokenPreference(mint, nextPreference)
+    if (nextPreference === 'never') {
+      setSelectedMints(prev => {
+        const next = new Set(prev)
+        next.delete(mint)
+        return next
+      })
+    }
+  }
+
+  function setAlwaysSellPreference(mint: string) {
+    const nextPreference = tokenPreferenceForMint(mint) === 'always' ? null : 'always'
+    setTokenPreference(mint, nextPreference)
   }
 
   async function executeSellRun(targetTokens: Token[], options: { resetResults: boolean; resetSummary: boolean }) {
@@ -648,6 +921,12 @@ export function Home() {
     }
 
     if (targetTokens.length === 0) {
+      return
+    }
+
+    const safeTargetTokens = targetTokens.filter(token => !isNeverSellMint(token.mint))
+    if (safeTargetTokens.length === 0) {
+      pushToast('info', 'All selected tokens are marked as never sell.')
       return
     }
 
@@ -679,23 +958,27 @@ export function Home() {
     }
 
     setIsSelling(true)
-    setActiveSellTargetCount(targetTokens.filter(isSellableToken).length)
+    setActiveSellTargetCount(safeTargetTokens.filter(isSellableToken).length)
+    setCurrentRunMints(new Set(safeTargetTokens.map(token => token.mint)))
     setGlobalError(null)
     if (options.resetSummary) {
       setSellSummary(null)
     }
     if (options.resetResults) {
       setSellResults({})
+      setProgressEvents([])
+      progressCounterRef.current = 0
     }
+    appendBatchProgressEvent(`Started batch for ${safeTargetTokens.length} token${safeTargetTokens.length > 1 ? 's' : ''}.`)
 
     try {
       const preparedSwaps: PreparedSwap[] = []
 
-      for (let index = 0; index < targetTokens.length; index += 1) {
-        const token = targetTokens[index]
+      for (let index = 0; index < safeTargetTokens.length; index += 1) {
+        const token = safeTargetTokens[index]
 
         if (!isWalletSessionValid()) {
-          handleWalletDisconnection(targetTokens.slice(index))
+          handleWalletDisconnection(safeTargetTokens.slice(index))
           break
         }
 
@@ -850,6 +1133,12 @@ export function Home() {
                   signature,
                   message: 'Done.',
                 })
+                addRecentActivity({
+                  signature,
+                  mint: preparedSwap.token.mint,
+                  tokenLabel: tokenLabel(preparedSwap.token),
+                  tokenAmount: preparedSwap.token.amount,
+                })
               } catch (error) {
                 failed += 1
                 const message = swapFailureMessage(preparedSwap.token, error)
@@ -900,6 +1189,12 @@ export function Home() {
               succeeded += 1
               soldMints.add(preparedSwap.token.mint)
               updateSellResult(preparedSwap.token.mint, { state: 'confirmed', signature, message: 'Done.' })
+              addRecentActivity({
+                signature,
+                mint: preparedSwap.token.mint,
+                tokenLabel: tokenLabel(preparedSwap.token),
+                tokenAmount: preparedSwap.token.amount,
+              })
             } catch (error) {
               failed += 1
               const message = swapFailureMessage(preparedSwap.token, error)
@@ -919,6 +1214,8 @@ export function Home() {
         setSellSummary({ sold: succeeded, failed, skipped })
       }
 
+      appendBatchProgressEvent(`Finished: ${succeeded} confirmed, ${failed} failed, ${skipped} skipped.`)
+
       if (succeeded > 0) {
         pushToast('success', `Confirmed ${succeeded} swap${succeeded > 1 ? 's' : ''}.`)
       }
@@ -935,6 +1232,7 @@ export function Home() {
     } finally {
       setIsSelling(false)
       setActiveSellTargetCount(0)
+      setCurrentRunMints(new Set())
     }
   }
 
@@ -943,8 +1241,12 @@ export function Home() {
       return
     }
 
-    const selectedTokens = tokens.filter(token => selectedMints.has(token.mint))
-    await executeSellRun(selectedTokens, {
+    setIsConfirmModalOpen(true)
+  }
+
+  async function confirmSellSelectedTokens() {
+    setIsConfirmModalOpen(false)
+    await executeSellRun(selectedTokensForSell, {
       resetResults: true,
       resetSummary: true,
     })
@@ -958,6 +1260,11 @@ export function Home() {
     const token = tokens.find(item => item.mint === mint)
     if (!token) {
       pushToast('error', 'Token was not found in current wallet state. Refresh and retry.')
+      return
+    }
+
+    if (isNeverSellMint(mint)) {
+      pushToast('info', `${tokenLabel(token)} is marked as never sell.`)
       return
     }
 
@@ -1011,6 +1318,46 @@ export function Home() {
           </div>
         ))}
       </div>
+
+      {isConfirmModalOpen && (
+        <div
+          className="fixed inset-0 z-[140] bg-black/55 backdrop-blur-[2px] flex items-center justify-center p-4"
+          onClick={() => setIsConfirmModalOpen(false)}
+        >
+          <div className="w-full max-w-md border border-border bg-background p-4 font-mono" onClick={(e) => e.stopPropagation()}>
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">Confirm sell</div>
+            <div className="text-sm leading-relaxed text-foreground">
+              You&apos;re selling {selectedSellableCount} token{selectedSellableCount > 1 ? 's' : ''} for
+              {' '}~{formatSolEstimate(sellEstimate.totalOutLamports)} SOL.
+              {' '}Priority fees: ~{estimatedFeeLamports ? formatLamportsAsSol(estimatedFeeLamports, 6) : '--'} SOL.
+              {' '}Proceed?
+            </div>
+            <div className="mt-4 text-[11px] text-muted-foreground">
+              Slippage: {formatSlippageBps(effectiveSlippageBps)}. Quotes: {quoteAgeLabel}.
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsConfirmModalOpen(false)}
+                disabled={isSelling}
+                className="h-8 px-3 border border-border text-[11px] uppercase tracking-wider hover:bg-accent transition-colors disabled:opacity-40"
+              >
+                cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void confirmSellSelectedTokens()
+                }}
+                disabled={isSelling || selectedSellableCount === 0}
+                className="h-8 px-3 bg-foreground text-background text-[11px] uppercase tracking-wider hover:opacity-85 transition-opacity disabled:opacity-30"
+              >
+                proceed
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="min-h-screen">
         {connected ? (
@@ -1164,7 +1511,7 @@ export function Home() {
                 <button
                   type="button"
                   onClick={autoSelectDustTokens}
-                  disabled={isSelling || visibleSellableTokens.length === 0}
+                  disabled={isSelling || selectableVisibleSellableTokens.length === 0}
                   className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
                 >
                   auto-select
@@ -1175,7 +1522,7 @@ export function Home() {
                 <button
                   type="button"
                   onClick={selectAllSellable}
-                  disabled={isSelling || visibleSellableTokens.length === 0}
+                  disabled={isSelling || selectableVisibleSellableTokens.length === 0}
                   className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
                 >
                   all
@@ -1201,6 +1548,12 @@ export function Home() {
                   </span>
                 )}
 
+                {selectedSellableCount > 0 && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    {quoteAgeLabel}
+                  </span>
+                )}
+
                 <span className="text-muted-foreground text-[11px] hidden sm:inline">
                   slip {formatSlippageBps(effectiveSlippageBps)}
                 </span>
@@ -1216,6 +1569,15 @@ export function Home() {
                     est. fees ~ {formatLamportsAsSol(estimatedFeeLamports, 6)} SOL
                   </span>
                 )}
+
+                <button
+                  type="button"
+                  onClick={refreshEstimate}
+                  disabled={isSelling || selectedSellableCount === 0 || sellEstimate.loading}
+                  className="h-8 px-3 border border-border text-[11px] font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
+                >
+                  {sellEstimate.loading ? 'refreshing...' : 'refresh estimate'}
+                </button>
 
                 <button
                   type="button"
@@ -1240,26 +1602,66 @@ export function Home() {
               </div>
             )}
 
-            {isSelling && (
+            {(isSelling || progressEvents.length > 0) && (
               <div className="py-4 border-b border-border font-mono text-xs text-muted-foreground">
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-foreground" />
+                    {isSelling ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-foreground" />
+                    ) : (
+                      <span className="inline-block h-2 w-2 bg-foreground/30" />
+                    )}
                     <span>
-                      {isBatchSigningSupported && selectedSellableCount > 1
-                        ? 'Approve signature batches in your wallet'
-                        : 'Approve each swap in your wallet'}
+                      {isSelling
+                        ? `Selling ${completedSellCount}/${activeSellTargetCount}`
+                        : 'Recent execution activity'}
                     </span>
                   </div>
-                  <span className="tabular-nums text-foreground">
-                    {Object.keys(sellResults).length}/{activeSellTargetCount}
-                  </span>
+                  {isSelling && (
+                    <span className="tabular-nums text-foreground">
+                      {currentRunResultCount}/{activeSellTargetCount}
+                    </span>
+                  )}
                 </div>
-                <div className="h-1 bg-border relative overflow-hidden">
-                  <div
-                    className="h-full bg-foreground transition-all duration-700 ease-out"
-                    style={{ width: `${sellProgress}%` }}
-                  />
+
+                {isSelling && (
+                  <>
+                    <div className="mt-3 h-1 bg-border relative overflow-hidden">
+                      <div
+                        className="h-full bg-foreground transition-all duration-700 ease-out"
+                        style={{ width: `${sellProgress}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-[11px]">
+                      {activeExecutionEntry
+                        ? `${activeExecutionEntry.tokenLabel} ${activeExecutionEntry.state === 'awaiting-signature' ? 'awaiting signature' : activeExecutionEntry.state === 'submitted' ? 'confirming' : 'routing'}`
+                        : isBatchSigningSupported && activeSellTargetCount > 1
+                          ? 'Approve signature batches in your wallet'
+                          : 'Approve each swap in your wallet'}
+                    </div>
+                  </>
+                )}
+
+                <div className="mt-3 border border-border/60 bg-muted/30 max-h-44 overflow-auto">
+                  {recentProgressEvents.length > 0 ? (
+                    recentProgressEvents.map(event => (
+                      <div key={event.id} className="flex items-center gap-2.5 px-2.5 py-2 border-b border-border/30 last:border-b-0">
+                        <Badge variant={executionBadgeVariant(event.state)}>
+                          {event.mint === 'batch' ? 'BATCH' : executionLabel(event.state)}
+                        </Badge>
+                        <span className="truncate min-w-0">
+                          {event.mint === 'batch'
+                            ? event.message
+                            : `${event.tokenLabel}: ${event.message}`}
+                        </span>
+                        <span className="ml-auto text-[10px] text-muted-foreground/70 tabular-nums">
+                          {formatTimeAgo(event.timestamp, nowMs)}
+                        </span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="px-2.5 py-2 text-[11px] text-muted-foreground">No activity yet.</div>
+                  )}
                 </div>
               </div>
             )}
@@ -1296,6 +1698,32 @@ export function Home() {
               </div>
             )}
 
+            {recentActivity.length > 0 && (
+              <div className="py-4 border-b border-border font-mono text-xs">
+                <div className="mb-2 text-[10px] uppercase tracking-widest text-muted-foreground">Recent activity</div>
+                <div className="border border-border/60 bg-muted/30">
+                  {recentActivity.slice(0, 8).map(activity => (
+                    <div key={activity.id} className="flex items-center gap-2.5 px-2.5 py-2 border-b border-border/30 last:border-b-0">
+                      <span className="min-w-0 truncate">
+                        Sold {activity.tokenAmount.toLocaleString()} {activity.tokenLabel}
+                      </span>
+                      <span className="ml-auto text-[10px] text-muted-foreground/70 tabular-nums">
+                        {formatTimeAgo(activity.timestamp, nowMs)}
+                      </span>
+                      <a
+                        href={`https://solscan.io/tx/${activity.signature}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline underline-offset-2 hover:text-foreground transition-colors"
+                      >
+                        solscan
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {loading ? (
               <div className="py-24 flex flex-col items-center gap-4">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
@@ -1316,6 +1744,7 @@ export function Home() {
                     const execution = sellResults[token.mint]
                     const selected = selectedMints.has(token.mint)
                     const sellable = isSellableToken(token)
+                    const preference = tokenPreferenceForMint(token.mint)
                     const verificationLevel = getVerificationLevel(token.metadata || null)
                     const txUrl = execution?.signature ? `https://solscan.io/tx/${execution.signature}` : null
                     const usdValue = tokenValueUsd(token)
@@ -1326,7 +1755,10 @@ export function Home() {
                     return (
                       <div
                         key={token.mint}
-                        className={cn(!sellable && 'opacity-30')}
+                        className={cn(
+                          !sellable && 'opacity-30',
+                          preference === 'never' && 'opacity-55'
+                        )}
                         style={{
                           animation: `fadeUp 0.25s ease-out ${Math.min(index * 0.02, 0.5)}s both`,
                         }}
@@ -1337,9 +1769,9 @@ export function Home() {
                             selected
                               ? 'bg-foreground/[0.04] border-l-2 border-l-foreground pl-2.5 md:pl-0.5'
                               : 'border-l-2 border-l-transparent pl-2.5 md:pl-0.5',
-                            sellable && !isSelling && 'hover:bg-foreground/[0.025] cursor-pointer'
+                            sellable && !isSelling && preference !== 'never' && 'hover:bg-foreground/[0.025] cursor-pointer'
                           )}
-                          onClick={() => sellable && !isSelling && toggleMintSelection(token.mint)}
+                          onClick={() => sellable && !isSelling && preference !== 'never' && toggleMintSelection(token.mint)}
                         >
                           <div className="flex justify-center">
                             <div
@@ -1348,6 +1780,7 @@ export function Home() {
                                 selected
                                   ? 'border-foreground bg-foreground'
                                   : 'border-muted-foreground/25 hover:border-muted-foreground/50',
+                                preference === 'never' && !selected && 'border-[hsl(var(--status-error))]/40',
                                 isSelling && 'opacity-40'
                               )}
                             >
@@ -1372,6 +1805,42 @@ export function Home() {
                                 <span className="font-mono text-[10px] text-muted-foreground/50 hidden sm:inline">
                                   {truncateAddress(token.mint)}
                                 </span>
+                              </div>
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setAlwaysSellPreference(token.mint)
+                                  }}
+                                  disabled={isSelling || !sellable}
+                                  className={cn(
+                                    'px-1.5 py-0.5 border text-[9px] uppercase tracking-wider transition-colors',
+                                    preference === 'always'
+                                      ? 'border-[hsl(var(--status-success))]/60 text-[hsl(var(--status-success))]'
+                                      : 'border-border/60 text-muted-foreground hover:bg-accent',
+                                    'disabled:opacity-40'
+                                  )}
+                                >
+                                  always
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setNeverSellPreference(token.mint)
+                                  }}
+                                  disabled={isSelling || !sellable}
+                                  className={cn(
+                                    'px-1.5 py-0.5 border text-[9px] uppercase tracking-wider transition-colors',
+                                    preference === 'never'
+                                      ? 'border-[hsl(var(--status-error))]/60 text-[hsl(var(--status-error))]'
+                                      : 'border-border/60 text-muted-foreground hover:bg-accent',
+                                    'disabled:opacity-40'
+                                  )}
+                                >
+                                  never
+                                </button>
                               </div>
                               <span className={cn(
                                 'font-mono text-[9px] uppercase tracking-wider md:hidden',
