@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { Connection, VersionedTransaction } from '@solana/web3.js'
-import { Loader2, ArrowRight } from 'lucide-react'
+import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'
@@ -67,6 +67,12 @@ interface SellSummary {
   sold: number
   failed: number
   skipped: number
+}
+
+interface ShareResultSummary {
+  soldCount: number
+  attemptedCount: number
+  reclaimedLamportsEstimate: bigint | null
 }
 
 interface PreparedSwap {
@@ -195,6 +201,12 @@ function formatTimeAgo(timestamp: number, nowMs: number): string {
   return `${days}d ago`
 }
 
+function formatShareReclaimedLabel(lamportsEstimate: bigint | null): string {
+  if (lamportsEstimate === null || lamportsEstimate <= BigInt(0)) return 'extra SOL'
+  if (lamportsEstimate < BigInt(1_000)) return '<0.000001 SOL'
+  return `${formatLamportsAsSol(lamportsEstimate, 3)} SOL`
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -283,6 +295,15 @@ function formatSlippageBps(slippageBps: number): string {
 
 function sortTokens(tokens: Token[], sortBy: TokenSort): Token[] {
   return [...tokens].sort((a, b) => {
+    const aLevel = getVerificationLevel(a.metadata || null)
+    const bLevel = getVerificationLevel(b.metadata || null)
+    const aPriority = VERIFICATION_PRIORITY[aLevel] ?? 4
+    const bPriority = VERIFICATION_PRIORITY[bLevel] ?? 4
+
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority
+    }
+
     if (sortBy === 'name') {
       const aName = (a.metadata?.symbol || a.metadata?.name || a.mint).toLowerCase()
       const bName = (b.metadata?.symbol || b.metadata?.name || b.mint).toLowerCase()
@@ -299,15 +320,6 @@ function sortTokens(tokens: Token[], sortBy: TokenSort): Token[] {
       if (aValue !== null) return -1
       if (bValue !== null) return 1
       return (b.amount || 0) - (a.amount || 0)
-    }
-
-    const aLevel = getVerificationLevel(a.metadata || null)
-    const bLevel = getVerificationLevel(b.metadata || null)
-    const aPriority = VERIFICATION_PRIORITY[aLevel] ?? 4
-    const bPriority = VERIFICATION_PRIORITY[bLevel] ?? 4
-
-    if (aPriority !== bPriority) {
-      return aPriority - bPriority
     }
 
     const aValue = tokenValueUsd(a)
@@ -361,6 +373,8 @@ export function Home() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [recentActivity, setRecentActivity] = useState<RecentActivityItem[]>([])
   const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([])
+  const [shareResultSummary, setShareResultSummary] = useState<ShareResultSummary | null>(null)
+  const [shareCaptionCopied, setShareCaptionCopied] = useState(false)
   const [hasHydratedStorage, setHasHydratedStorage] = useState(false)
 
   const dustThresholdUsd = useMemo(() => {
@@ -385,6 +399,7 @@ export function Home() {
   const estimateForceRefreshRef = useRef(false)
   const walletConnectedRef = useRef(connected)
   const walletAddressRef = useRef(publicKey?.toBase58() || null)
+  const shareCopiedResetTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     walletConnectedRef.current = connected
@@ -421,6 +436,14 @@ export function Home() {
     if (!hasHydratedStorage) return
     localStorage.setItem(RECENT_ACTIVITY_STORAGE_KEY, JSON.stringify(recentActivity))
   }, [recentActivity, hasHydratedStorage])
+
+  useEffect(() => {
+    return () => {
+      if (shareCopiedResetTimerRef.current !== null) {
+        window.clearTimeout(shareCopiedResetTimerRef.current)
+      }
+    }
+  }, [])
 
   function removeToast(id: number) {
     setToasts(prev => prev.filter(toast => toast.id !== id))
@@ -630,6 +653,25 @@ export function Home() {
     [progressEvents]
   )
 
+  const shareReclaimedLabel = useMemo(
+    () => formatShareReclaimedLabel(shareResultSummary?.reclaimedLamportsEstimate ?? null),
+    [shareResultSummary]
+  )
+
+  const shareCaption = useMemo(() => {
+    if (!shareResultSummary) return ''
+    const tokenLabel = shareResultSummary.soldCount === 1 ? 'dust token' : 'dust tokens'
+    return `I just reclaimed ${shareReclaimedLabel} from ${shareResultSummary.soldCount} ${tokenLabel} with Sol Vacuum.`
+  }, [shareResultSummary, shareReclaimedLabel])
+
+  const shareIntentUrl = useMemo(() => {
+    if (!shareCaption) return null
+    const appUrl = typeof window !== 'undefined' ? window.location.origin : 'https://solvacuum.app'
+    const text = encodeURIComponent(shareCaption)
+    const url = encodeURIComponent(appUrl)
+    return `https://twitter.com/intent/tweet?text=${text}&url=${url}`
+  }, [shareCaption])
+
   useEffect(() => {
     if (!connected || isSelling || selectedSellableCount === 0) {
       setSellEstimate({
@@ -837,6 +879,23 @@ export function Home() {
     setEstimateRefreshNonce(prev => prev + 1)
   }
 
+  async function copyShareCaption() {
+    if (!shareCaption) return
+    try {
+      await navigator.clipboard.writeText(shareCaption)
+      setShareCaptionCopied(true)
+      if (shareCopiedResetTimerRef.current !== null) {
+        window.clearTimeout(shareCopiedResetTimerRef.current)
+      }
+      shareCopiedResetTimerRef.current = window.setTimeout(() => {
+        setShareCaptionCopied(false)
+      }, 2200)
+      pushToast('success', 'Share caption copied.')
+    } catch {
+      pushToast('error', 'Unable to copy caption. Copy manually.')
+    }
+  }
+
   async function executeSellRun(targetTokens: Token[], options: { resetResults: boolean; resetSummary: boolean }) {
     if (!connected || !publicKey || isSelling) {
       return
@@ -857,6 +916,8 @@ export function Home() {
     const ownerAddress = publicKey.toBase58()
     const connection = new Connection(rpcUrl, 'confirmed')
     const soldMints = new Set<string>()
+    const runTargetCount = targetTokens.filter(isSellableToken).length
+    const runEstimateSnapshot = options.resetSummary ? sellEstimate.totalOutLamports : null
     let succeeded = 0
     let failed = 0
     let skipped = 0
@@ -887,6 +948,8 @@ export function Home() {
     setGlobalError(null)
     if (options.resetSummary) {
       setSellSummary(null)
+      setShareResultSummary(null)
+      setShareCaptionCopied(false)
     }
     if (options.resetResults) {
       setSellResults({})
@@ -1141,6 +1204,15 @@ export function Home() {
       appendBatchProgressEvent(`Finished: ${succeeded} confirmed, ${failed} failed, ${skipped} skipped.`)
 
       if (succeeded > 0) {
+        const reclaimedLamportsEstimate = runEstimateSnapshot !== null && runTargetCount > 0
+          ? (runEstimateSnapshot * BigInt(succeeded)) / BigInt(runTargetCount)
+          : null
+        setShareResultSummary({
+          soldCount: succeeded,
+          attemptedCount: runTargetCount,
+          reclaimedLamportsEstimate,
+        })
+        setShareCaptionCopied(false)
         pushToast('success', `Confirmed ${succeeded} swap${succeeded > 1 ? 's' : ''}.`)
       }
 
@@ -1619,6 +1691,70 @@ export function Home() {
                     <span className="text-muted-foreground">{sellSummary.skipped} skipped</span>
                   </span>
                 )}
+              </div>
+            )}
+
+            {shareResultSummary && shareResultSummary.soldCount > 0 && (
+              <div
+                className="py-5 border-b border-border"
+                style={{ animation: 'fadeUp 0.35s ease-out' }}
+              >
+                <div className="relative overflow-hidden border border-[hsl(var(--status-success))]/35 bg-[linear-gradient(132deg,hsl(var(--status-success)/0.24)_0%,hsl(var(--background))_58%,hsl(var(--foreground)/0.08)_100%)] p-4 sm:p-5">
+                  <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-[hsl(var(--status-success))]/20 blur-2xl" />
+                  <div className="pointer-events-none absolute -left-10 bottom-0 h-20 w-20 rounded-full bg-foreground/10 blur-xl" />
+
+                  <div className="relative flex flex-wrap items-center justify-between gap-2">
+                    <div className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.22em] text-foreground/85">
+                      <Sparkles className="h-3 w-3" />
+                      Share Your Win
+                    </div>
+                    <div className="font-mono text-[10px] uppercase tracking-widest text-foreground/75">
+                      built for X + Solana feeds
+                    </div>
+                  </div>
+
+                  <div className="relative mt-4">
+                    <div className="font-serif italic text-[clamp(1.8rem,6vw,2.9rem)] leading-none tracking-tight text-foreground">
+                      {shareReclaimedLabel}
+                    </div>
+                    <p className="mt-2 font-mono text-xs text-foreground/80">
+                      reclaimed from {shareResultSummary.soldCount.toLocaleString()} dust token{shareResultSummary.soldCount === 1 ? '' : 's'}
+                    </p>
+                    {shareResultSummary.attemptedCount > shareResultSummary.soldCount && (
+                      <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                        {shareResultSummary.soldCount}/{shareResultSummary.attemptedCount} confirmed this run.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="relative mt-4 border border-foreground/15 bg-background/55 px-3 py-2.5 font-mono text-[11px] leading-relaxed text-foreground/88">
+                    {shareCaption}
+                  </div>
+
+                  <div className="relative mt-3 flex flex-wrap gap-2">
+                    {shareIntentUrl && (
+                      <a
+                        href={shareIntentUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="h-8 px-3 bg-foreground text-background text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:opacity-85 transition-opacity"
+                      >
+                        Share on X
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void copyShareCaption()
+                      }}
+                      className="h-8 px-3 border border-border text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:bg-background/70 transition-colors"
+                    >
+                      {shareCaptionCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                      {shareCaptionCopied ? 'Copied' : 'Copy caption'}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
