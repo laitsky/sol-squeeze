@@ -2,8 +2,18 @@ import { lazy, Suspense } from 'react'
 import { cn } from '@/lib/utils'
 
 const WalletMultiButton = lazy(() =>
-  import('@solana/wallet-adapter-react-ui').then((mod) => ({ default: mod.WalletMultiButton }))
+  import('@solana/wallet-adapter-react-ui').then((mod) => ({ default: mod.BaseWalletMultiButton }))
 )
+
+const NAVBAR_WALLET_LABELS = {
+  'change-wallet': 'Change wallet',
+  connecting: 'Connecting ...',
+  'copy-address': 'Copy address',
+  copied: 'Copied',
+  disconnect: 'Disconnect',
+  'has-wallet': 'Connect Wallet',
+  'no-wallet': 'Connect Wallet',
+} as const
 
 function normalizePath(pathname: string): string {
   if (!pathname) return '/'
@@ -40,7 +50,7 @@ export default function Navbar() {
             How it works
           </a>
           <Suspense fallback={<div className="h-8 w-28 border border-border" />}>
-            <WalletMultiButton />
+            <WalletMultiButton labels={NAVBAR_WALLET_LABELS} />
           </Suspense>
         </div>
       </div>

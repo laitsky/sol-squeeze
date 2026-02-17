@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
+import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { Connection, VersionedTransaction } from '@solana/web3.js'
 import { Loader2, ArrowRight } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -82,8 +83,6 @@ interface ToastItem {
   onAction?: () => void
 }
 
-type TokenPreference = 'always' | 'never'
-
 interface RecentActivityItem {
   id: string
   signature: string
@@ -112,7 +111,6 @@ const VERIFICATION_PRIORITY: Record<string, number> = {
 const SIGNING_BATCH_SIZE = 6
 const ESTIMATE_QUOTE_TTL_MS = 15_000
 const RECENT_ACTIVITY_STORAGE_KEY = 'sol-vacuum-recent-activity-v1'
-const TOKEN_PREFERENCES_STORAGE_KEY = 'sol-vacuum-token-preferences-v1'
 
 function isSellableToken(token: Token): boolean {
   return token.amount > 0 && token.mint !== SOL_MINT
@@ -335,6 +333,7 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 
 export function Home() {
   const { publicKey, connected, sendTransaction, signAllTransactions, wallet } = useWallet()
+  const { setVisible: setWalletModalVisible } = useWalletModal()
 
   const [tokens, setTokens] = useState<Token[]>([])
   const [loading, setLoading] = useState(false)
@@ -360,7 +359,6 @@ export function Home() {
 
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [recentActivity, setRecentActivity] = useState<RecentActivityItem[]>([])
-  const [tokenPreferences, setTokenPreferences] = useState<Record<string, TokenPreference>>({})
   const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([])
   const [hasHydratedStorage, setHasHydratedStorage] = useState(false)
 
@@ -409,24 +407,6 @@ export function Home() {
       setRecentActivity([])
     }
 
-    try {
-      const storedPreferences = localStorage.getItem(TOKEN_PREFERENCES_STORAGE_KEY)
-      if (storedPreferences) {
-        const parsed = JSON.parse(storedPreferences) as Record<string, TokenPreference>
-        if (parsed && typeof parsed === 'object') {
-          const nextPreferences: Record<string, TokenPreference> = {}
-          for (const [mint, value] of Object.entries(parsed)) {
-            if (value === 'always' || value === 'never') {
-              nextPreferences[mint] = value
-            }
-          }
-          setTokenPreferences(nextPreferences)
-        }
-      }
-    } catch {
-      setTokenPreferences({})
-    }
-
     setHasHydratedStorage(true)
   }, [])
 
@@ -434,11 +414,6 @@ export function Home() {
     if (!hasHydratedStorage) return
     localStorage.setItem(RECENT_ACTIVITY_STORAGE_KEY, JSON.stringify(recentActivity))
   }, [recentActivity, hasHydratedStorage])
-
-  useEffect(() => {
-    if (!hasHydratedStorage) return
-    localStorage.setItem(TOKEN_PREFERENCES_STORAGE_KEY, JSON.stringify(tokenPreferences))
-  }, [tokenPreferences, hasHydratedStorage])
 
   function removeToast(id: number) {
     setToasts(prev => prev.filter(toast => toast.id !== id))
@@ -462,26 +437,6 @@ export function Home() {
     setTimeout(() => {
       removeToast(id)
     }, 7000)
-  }
-
-  function tokenPreferenceForMint(mint: string): TokenPreference | null {
-    return tokenPreferences[mint] || null
-  }
-
-  function isNeverSellMint(mint: string): boolean {
-    return tokenPreferenceForMint(mint) === 'never'
-  }
-
-  function setTokenPreference(mint: string, preference: TokenPreference | null) {
-    setTokenPreferences(prev => {
-      const next = { ...prev }
-      if (!preference) {
-        delete next[mint]
-      } else {
-        next[mint] = preference
-      }
-      return next
-    })
   }
 
   function appendProgressEvent(mint: string, state: ExecutionState, message: string) {
@@ -550,11 +505,11 @@ export function Home() {
 
   useEffect(() => {
     setSelectedMints(prevSelected => {
-      const tokenMints = new Set(tokens.filter(token => isSellableToken(token) && !isNeverSellMint(token.mint)).map(token => token.mint))
+      const tokenMints = new Set(tokens.filter(isSellableToken).map(token => token.mint))
       const nextSelected = new Set(Array.from(prevSelected).filter(mint => tokenMints.has(mint)))
       return nextSelected
     })
-  }, [tokens, tokenPreferences])
+  }, [tokens])
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
 
@@ -587,11 +542,6 @@ export function Home() {
     [visibleTokens]
   )
 
-  const selectableVisibleSellableTokens = useMemo(
-    () => visibleSellableTokens.filter(token => !isNeverSellMint(token.mint)),
-    [visibleSellableTokens, tokenPreferences]
-  )
-
   const totalPortfolioValue = useMemo(() => {
     return tokens.reduce((total, token) => {
       if (token.price && token.amount) {
@@ -602,8 +552,8 @@ export function Home() {
   }, [tokens])
 
   const selectedTokensForSell = useMemo(
-    () => tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token) && !isNeverSellMint(token.mint)),
-    [tokens, selectedMints, tokenPreferences]
+    () => tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token)),
+    [tokens, selectedMints]
   )
 
   const selectedSellableCount = selectedTokensForSell.length
@@ -842,8 +792,6 @@ export function Home() {
   }
 
   function toggleMintSelection(mint: string) {
-    if (isNeverSellMint(mint)) return
-
     setSelectedMints(prevSelected => {
       const nextSelected = new Set(prevSelected)
       if (nextSelected.has(mint)) {
@@ -856,12 +804,8 @@ export function Home() {
   }
 
   function selectAllSellable() {
-    const alwaysSellMints = visibleSellableTokens
-      .filter(token => tokenPreferenceForMint(token.mint) === 'always')
-      .map(token => token.mint)
-
-    const safeVisibleMints = selectableVisibleSellableTokens.map(token => token.mint)
-    setSelectedMints(new Set([...safeVisibleMints, ...alwaysSellMints]))
+    const visibleMints = visibleSellableTokens.map(token => token.mint)
+    setSelectedMints(new Set(visibleMints))
   }
 
   function clearSelection() {
@@ -870,41 +814,20 @@ export function Home() {
 
   function autoSelectDustTokens() {
     const threshold = Math.max(0, dustThresholdUsd)
-    const dustMints = selectableVisibleSellableTokens
+    const dustMints = visibleSellableTokens
       .filter(token => {
         const usdValue = tokenValueUsd(token)
         return usdValue !== null && usdValue <= threshold
       })
       .map(token => token.mint)
 
-    const alwaysSellMints = selectableVisibleSellableTokens
-      .filter(token => tokenPreferenceForMint(token.mint) === 'always')
-      .map(token => token.mint)
-
-    setSelectedMints(new Set([...dustMints, ...alwaysSellMints]))
+    setSelectedMints(new Set(dustMints))
   }
 
   function refreshEstimate() {
     if (selectedSellableCount === 0 || sellEstimate.loading || isSelling) return
     estimateForceRefreshRef.current = true
     setEstimateRefreshNonce(prev => prev + 1)
-  }
-
-  function setNeverSellPreference(mint: string) {
-    const nextPreference = tokenPreferenceForMint(mint) === 'never' ? null : 'never'
-    setTokenPreference(mint, nextPreference)
-    if (nextPreference === 'never') {
-      setSelectedMints(prev => {
-        const next = new Set(prev)
-        next.delete(mint)
-        return next
-      })
-    }
-  }
-
-  function setAlwaysSellPreference(mint: string) {
-    const nextPreference = tokenPreferenceForMint(mint) === 'always' ? null : 'always'
-    setTokenPreference(mint, nextPreference)
   }
 
   async function executeSellRun(targetTokens: Token[], options: { resetResults: boolean; resetSummary: boolean }) {
@@ -921,12 +844,6 @@ export function Home() {
     }
 
     if (targetTokens.length === 0) {
-      return
-    }
-
-    const safeTargetTokens = targetTokens.filter(token => !isNeverSellMint(token.mint))
-    if (safeTargetTokens.length === 0) {
-      pushToast('info', 'All selected tokens are marked as never sell.')
       return
     }
 
@@ -958,8 +875,8 @@ export function Home() {
     }
 
     setIsSelling(true)
-    setActiveSellTargetCount(safeTargetTokens.filter(isSellableToken).length)
-    setCurrentRunMints(new Set(safeTargetTokens.map(token => token.mint)))
+    setActiveSellTargetCount(targetTokens.filter(isSellableToken).length)
+    setCurrentRunMints(new Set(targetTokens.map(token => token.mint)))
     setGlobalError(null)
     if (options.resetSummary) {
       setSellSummary(null)
@@ -969,16 +886,16 @@ export function Home() {
       setProgressEvents([])
       progressCounterRef.current = 0
     }
-    appendBatchProgressEvent(`Started batch for ${safeTargetTokens.length} token${safeTargetTokens.length > 1 ? 's' : ''}.`)
+    appendBatchProgressEvent(`Started batch for ${targetTokens.length} token${targetTokens.length > 1 ? 's' : ''}.`)
 
     try {
       const preparedSwaps: PreparedSwap[] = []
 
-      for (let index = 0; index < safeTargetTokens.length; index += 1) {
-        const token = safeTargetTokens[index]
+      for (let index = 0; index < targetTokens.length; index += 1) {
+        const token = targetTokens[index]
 
         if (!isWalletSessionValid()) {
-          handleWalletDisconnection(safeTargetTokens.slice(index))
+          handleWalletDisconnection(targetTokens.slice(index))
           break
         }
 
@@ -1263,11 +1180,6 @@ export function Home() {
       return
     }
 
-    if (isNeverSellMint(mint)) {
-      pushToast('info', `${tokenLabel(token)} is marked as never sell.`)
-      return
-    }
-
     updateSellResult(mint, { state: 'building', message: 'Retrying...' })
 
     await executeSellRun([token], {
@@ -1511,7 +1423,7 @@ export function Home() {
                 <button
                   type="button"
                   onClick={autoSelectDustTokens}
-                  disabled={isSelling || selectableVisibleSellableTokens.length === 0}
+                  disabled={isSelling || visibleSellableTokens.length === 0}
                   className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
                 >
                   auto-select
@@ -1522,7 +1434,7 @@ export function Home() {
                 <button
                   type="button"
                   onClick={selectAllSellable}
-                  disabled={isSelling || selectableVisibleSellableTokens.length === 0}
+                  disabled={isSelling || visibleSellableTokens.length === 0}
                   className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
                 >
                   all
@@ -1744,7 +1656,6 @@ export function Home() {
                     const execution = sellResults[token.mint]
                     const selected = selectedMints.has(token.mint)
                     const sellable = isSellableToken(token)
-                    const preference = tokenPreferenceForMint(token.mint)
                     const verificationLevel = getVerificationLevel(token.metadata || null)
                     const txUrl = execution?.signature ? `https://solscan.io/tx/${execution.signature}` : null
                     const usdValue = tokenValueUsd(token)
@@ -1755,10 +1666,7 @@ export function Home() {
                     return (
                       <div
                         key={token.mint}
-                        className={cn(
-                          !sellable && 'opacity-30',
-                          preference === 'never' && 'opacity-55'
-                        )}
+                        className={cn(!sellable && 'opacity-30')}
                         style={{
                           animation: `fadeUp 0.25s ease-out ${Math.min(index * 0.02, 0.5)}s both`,
                         }}
@@ -1769,9 +1677,9 @@ export function Home() {
                             selected
                               ? 'bg-foreground/[0.04] border-l-2 border-l-foreground pl-2.5 md:pl-0.5'
                               : 'border-l-2 border-l-transparent pl-2.5 md:pl-0.5',
-                            sellable && !isSelling && preference !== 'never' && 'hover:bg-foreground/[0.025] cursor-pointer'
+                            sellable && !isSelling && 'hover:bg-foreground/[0.025] cursor-pointer'
                           )}
-                          onClick={() => sellable && !isSelling && preference !== 'never' && toggleMintSelection(token.mint)}
+                          onClick={() => sellable && !isSelling && toggleMintSelection(token.mint)}
                         >
                           <div className="flex justify-center">
                             <div
@@ -1780,7 +1688,6 @@ export function Home() {
                                 selected
                                   ? 'border-foreground bg-foreground'
                                   : 'border-muted-foreground/25 hover:border-muted-foreground/50',
-                                preference === 'never' && !selected && 'border-[hsl(var(--status-error))]/40',
                                 isSelling && 'opacity-40'
                               )}
                             >
@@ -1806,44 +1713,8 @@ export function Home() {
                                   {truncateAddress(token.mint)}
                                 </span>
                               </div>
-                              <div className="mt-1 flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    setAlwaysSellPreference(token.mint)
-                                  }}
-                                  disabled={isSelling || !sellable}
-                                  className={cn(
-                                    'px-1.5 py-0.5 border text-[9px] uppercase tracking-wider transition-colors',
-                                    preference === 'always'
-                                      ? 'border-[hsl(var(--status-success))]/60 text-[hsl(var(--status-success))]'
-                                      : 'border-border/60 text-muted-foreground hover:bg-accent',
-                                    'disabled:opacity-40'
-                                  )}
-                                >
-                                  always
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    setNeverSellPreference(token.mint)
-                                  }}
-                                  disabled={isSelling || !sellable}
-                                  className={cn(
-                                    'px-1.5 py-0.5 border text-[9px] uppercase tracking-wider transition-colors',
-                                    preference === 'never'
-                                      ? 'border-[hsl(var(--status-error))]/60 text-[hsl(var(--status-error))]'
-                                      : 'border-border/60 text-muted-foreground hover:bg-accent',
-                                    'disabled:opacity-40'
-                                  )}
-                                >
-                                  never
-                                </button>
-                              </div>
                               <span className={cn(
-                                'font-mono text-[9px] uppercase tracking-wider md:hidden',
+                                'mt-1 block font-mono text-[9px] uppercase tracking-wider md:hidden',
                                 verificationLevel === 'strict' || verificationLevel === 'verified'
                                   ? 'text-foreground/40'
                                   : 'text-muted-foreground/60'
@@ -1965,9 +1836,15 @@ export function Home() {
                 Connect your wallet. Select the tokens worth less than you
                 care about. Sell them all to SOL in one batch.
               </p>
-              <div className="flex items-center gap-3 font-mono text-[11px] text-muted-foreground/60">
-                <ArrowRight className="h-3 w-3" />
-                <span>Connect wallet to begin</span>
+              <div className="flex items-center gap-3">
+                <ArrowRight className="h-3 w-3 text-muted-foreground/60" />
+                <button
+                  type="button"
+                  onClick={() => setWalletModalVisible(true)}
+                  className="wallet-adapter-button wallet-adapter-button-trigger"
+                >
+                  Connect wallet to begin
+                </button>
               </div>
             </div>
           </div>
