@@ -28,7 +28,7 @@ export default function Navbar() {
     <nav className="sticky top-0 z-50 w-full bg-background/80 backdrop-blur-md border-b border-border">
       <div className="max-w-[1000px] mx-auto px-6 flex h-12 items-center justify-between">
         <a href="/" className="font-serif text-lg italic tracking-tight">
-          Sol Vacuum
+          Sol Squeeze
         </a>
         <div className="flex items-center gap-5">
           <a

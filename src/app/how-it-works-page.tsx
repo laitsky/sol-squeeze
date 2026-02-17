@@ -9,7 +9,7 @@ export function HowItWorksPage() {
           <div className="max-w-[760px]">
             <div className="w-12 h-px bg-foreground/30 mb-10" />
             <h1 className="font-serif italic text-[clamp(2.4rem,8vw,5rem)] leading-[0.95] tracking-tight mb-6">
-              How Sol Vacuum<br />
+              How Sol Squeeze<br />
               works
             </h1>
             <p className="font-mono text-sm text-muted-foreground leading-relaxed mb-10 max-w-[620px]">
@@ -25,7 +25,7 @@ export function HowItWorksPage() {
                   major venues.
                 </p>
                 <p>
-                  Sol Vacuum is non-custodial: your wallet signs each transaction, and funds never leave your control
+                  Sol Squeeze is non-custodial: your wallet signs each transaction, and funds never leave your control
                   except for the swaps you explicitly approve.
                 </p>
               </div>

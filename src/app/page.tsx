@@ -116,7 +116,7 @@ const VERIFICATION_PRIORITY: Record<string, number> = {
 
 const SIGNING_BATCH_SIZE = 6
 const ESTIMATE_QUOTE_TTL_MS = 15_000
-const RECENT_ACTIVITY_STORAGE_KEY = 'sol-vacuum-recent-activity-v1'
+const RECENT_ACTIVITY_STORAGE_KEY = 'sol-squeeze-recent-activity-v1'
 const DEFAULT_DUST_THRESHOLD_USD = 5
 
 function isSellableToken(token: Token): boolean {
@@ -661,12 +661,12 @@ export function Home() {
   const shareCaption = useMemo(() => {
     if (!shareResultSummary) return ''
     const tokenLabel = shareResultSummary.soldCount === 1 ? 'dust token' : 'dust tokens'
-    return `I just reclaimed ${shareReclaimedLabel} from ${shareResultSummary.soldCount} ${tokenLabel} with Sol Vacuum.`
+    return `I just reclaimed ${shareReclaimedLabel} from ${shareResultSummary.soldCount} ${tokenLabel} with Sol Squeeze.`
   }, [shareResultSummary, shareReclaimedLabel])
 
   const shareIntentUrl = useMemo(() => {
     if (!shareCaption) return null
-    const appUrl = typeof window !== 'undefined' ? window.location.origin : 'https://solvacuum.app'
+    const appUrl = typeof window !== 'undefined' ? window.location.origin : 'https://solsqueeze.app'
     const text = encodeURIComponent(shareCaption)
     const url = encodeURIComponent(appUrl)
     return `https://twitter.com/intent/tweet?text=${text}&url=${url}`

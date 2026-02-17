@@ -1,4 +1,4 @@
-# sol-vacuum
+# sol-squeeze
 
 Client-side Solana app to scan wallet SPL balances and swap selected dust tokens to SOL using Jupiter.
 
