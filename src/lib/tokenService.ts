@@ -47,6 +47,18 @@ export interface FetchTokensOptions {
   onFirstPage?: (tokens: WalletTokenBalance[]) => void;
 }
 
+export type TokenServiceErrorCode = 'MISSING_API_KEY' | 'API_ERROR';
+
+export class TokenServiceError extends Error {
+  code: TokenServiceErrorCode;
+
+  constructor(code: TokenServiceErrorCode, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'TokenServiceError';
+  }
+}
+
 const LOCAL_TOKEN_REGISTRY: Record<string, LocalTokenInfo> = {
   So11111111111111111111111111111111111111112: {
     name: 'Wrapped SOL',
@@ -108,6 +120,14 @@ function getHeliusWalletApiBaseUrl(): string {
   return baseUrl.replace(/\/+$/, '');
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 export async function fetchWalletTokenBalances(
   walletAddress: string,
   options?: FetchTokensOptions
@@ -118,8 +138,10 @@ export async function fetchWalletTokenBalances(
 
   const apiKey = getHeliusApiKey();
   if (!apiKey) {
-    console.error('Helius API key missing. Set VITE_HELIUS_API_KEY or include api-key in VITE_SOLANA_RPC_URL.');
-    return [];
+    throw new TokenServiceError(
+      'MISSING_API_KEY',
+      'Helius API key missing. Set VITE_HELIUS_API_KEY or include api-key in VITE_SOLANA_RPC_URL.'
+    );
   }
 
   const signal = options?.signal;
@@ -250,8 +272,15 @@ export async function fetchWalletTokenBalances(
   } catch (error) {
     // On abort, return whatever we have so far
     if (signal?.aborted) return Array.from(tokenMap.values());
-    console.error('Error fetching wallet token balances from Helius Wallet API:', error);
-    return Array.from(tokenMap.values());
+    if (tokenMap.size > 0) {
+      console.warn('Returning partial wallet token balances after API error:', error);
+      return Array.from(tokenMap.values());
+    }
+
+    throw new TokenServiceError(
+      'API_ERROR',
+      `Error fetching wallet token balances from Helius Wallet API: ${errorMessage(error)}`
+    );
   }
 }
 

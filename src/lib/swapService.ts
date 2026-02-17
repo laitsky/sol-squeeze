@@ -29,6 +29,8 @@ interface QuoteCacheEntry {
 }
 
 const quoteCache = new Map<string, QuoteCacheEntry>()
+const DEFAULT_MAX_PRIORITY_FEE_LAMPORTS = 0
+const MAX_PRIORITY_FEE_LAMPORTS_CAP = 2_000_000
 
 function getJupiterBaseUrl(): string {
   const configured = import.meta.env.VITE_JUPITER_SWAP_API_URL || 'https://api.jup.ag'
@@ -37,6 +39,24 @@ function getJupiterBaseUrl(): string {
 
 function getJupiterApiKey(): string | null {
   return import.meta.env.VITE_JUPITER_API_KEY || null
+}
+
+function parseMaxPriorityFeeLamports(value: string | undefined): number {
+  if (!value) return DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
+
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_MAX_PRIORITY_FEE_LAMPORTS
+  }
+
+  const integerValue = Math.floor(parsed)
+  if (integerValue <= 0) return 0
+
+  return Math.min(integerValue, MAX_PRIORITY_FEE_LAMPORTS_CAP)
+}
+
+export function getMaxPriorityFeeLamports(): number {
+  return parseMaxPriorityFeeLamports(import.meta.env.VITE_JUPITER_MAX_PRIORITY_FEE_LAMPORTS)
 }
 
 function getJupiterHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -170,24 +190,30 @@ export async function buildJupiterSwapTransaction({
   userPublicKey,
 }: JupiterSwapRequest): Promise<{ transaction: VersionedTransaction; lastValidBlockHeight: number }> {
   const baseUrl = getJupiterBaseUrl()
+  const maxPriorityFeeLamports = getMaxPriorityFeeLamports()
+  const body: Record<string, unknown> = {
+    quoteResponse,
+    userPublicKey,
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+    dynamicSlippage: true,
+  }
+
+  if (maxPriorityFeeLamports > 0) {
+    body.prioritizationFeeLamports = {
+      priorityLevelWithMaxLamports: {
+        maxLamports: maxPriorityFeeLamports,
+        priorityLevel: 'high',
+      },
+    }
+  }
+
   const response = await fetch(`${baseUrl}/swap/v1/swap`, {
     method: 'POST',
     headers: getJupiterHeaders({
       'Content-Type': 'application/json',
     }),
-    body: JSON.stringify({
-      quoteResponse,
-      userPublicKey,
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-      dynamicSlippage: true,
-      prioritizationFeeLamports: {
-        priorityLevelWithMaxLamports: {
-          maxLamports: 1000000,
-          priorityLevel: 'high',
-        },
-      },
-    }),
+    body: JSON.stringify(body),
   })
 
   const payload: JupiterSwapResponse & { error?: string } = await response.json()

@@ -1,35 +1,39 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# sol-vacuum
 
-## Getting Started
+Client-side Solana app to scan wallet SPL balances and swap selected dust tokens to SOL using Jupiter.
 
-Install dependencies with Bun:
+## Requirements
+
+- Bun `1.3+`
+- A Solana RPC URL
+- A Helius API key (or RPC URL with `api-key` query parameter)
+
+## Setup
+
+1. Install dependencies:
 
 ```bash
 bun install
 ```
 
-Run the development server:
+2. Copy env file and fill values:
 
 ```bash
-bun run dev
+cp .env.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Environment Variables
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- `VITE_SOLANA_RPC_URL` - Solana RPC endpoint.
+- `VITE_HELIUS_API_KEY` - Helius API key (optional if embedded in `VITE_SOLANA_RPC_URL`).
+- `VITE_HELIUS_WALLET_API_URL` - Wallet API base URL (default `https://api.helius.xyz`).
+- `VITE_JUPITER_SWAP_API_URL` - Jupiter API base URL (default `https://api.jup.ag`).
+- `VITE_JUPITER_API_KEY` - Optional Jupiter API key.
+- `VITE_JUPITER_MAX_PRIORITY_FEE_LAMPORTS` - Optional per-swap max priority fee cap. Default is `0`.
 
-## Learn More
+## Scripts
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
-# sol-vacuum
+- `bun run dev` - Start Vite dev server on port `3000`.
+- `bun run lint` - Typecheck (`tsc --noEmit`).
+- `bun run build` - Typecheck and production build.
+- `bun run preview` - Preview production build.

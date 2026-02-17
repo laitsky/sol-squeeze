@@ -6,8 +6,21 @@ import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'
 import Navbar from '../components/Navbar'
-import { fetchWalletTokenBalances, getTokenDisplayName, formatPrice, isTokenVerified, getVerificationLevel } from '../lib/tokenService'
-import { buildJupiterSwapTransaction, getJupiterQuote, SOL_MINT, toRawAmount } from '../lib/swapService'
+import {
+  fetchWalletTokenBalances,
+  getTokenDisplayName,
+  formatPrice,
+  isTokenVerified,
+  getVerificationLevel,
+  TokenServiceError,
+} from '../lib/tokenService'
+import {
+  buildJupiterSwapTransaction,
+  getJupiterQuote,
+  getMaxPriorityFeeLamports,
+  SOL_MINT,
+  toRawAmount,
+} from '../lib/swapService'
 
 interface TokenMetadata {
   name: string
@@ -36,12 +49,18 @@ interface ExecutionResult {
 }
 
 interface SellEstimate {
-  totalSol: number | null
+  totalOutLamports: bigint | null
   quotedCount: number
   failedCount: number
   skippedCount: number
   loading: boolean
   error: string | null
+}
+
+interface SellSummary {
+  sold: number
+  failed: number
+  skipped: number
 }
 
 function sortTokensByVerificationAndValue(tokens: Token[]): Token[] {
@@ -103,11 +122,32 @@ function getQuoteOutAmountRaw(quoteResponse: Record<string, unknown>): string | 
   return null
 }
 
-function formatSolEstimate(amount: number | null): string {
-  if (amount === null) return '--'
-  if (amount <= 0) return '0'
-  if (amount < 0.000001) return '<0.000001'
-  return amount.toLocaleString(undefined, { maximumFractionDigits: 6 })
+function formatWithThousandsSeparators(value: string): string {
+  return value.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+}
+
+function formatLamportsAsSol(lamports: bigint, maxFractionDigits = 6): string {
+  const lamportsPerSol = BigInt(1_000_000_000)
+  const wholePart = lamports / lamportsPerSol
+  const wholePartFormatted = formatWithThousandsSeparators(wholePart.toString())
+  if (maxFractionDigits <= 0) {
+    return wholePartFormatted
+  }
+
+  const fractionDigits = (lamports % lamportsPerSol)
+    .toString()
+    .padStart(9, '0')
+    .slice(0, maxFractionDigits)
+    .replace(/0+$/, '')
+
+  return fractionDigits ? `${wholePartFormatted}.${fractionDigits}` : wholePartFormatted
+}
+
+function formatSolEstimate(totalOutLamports: bigint | null): string {
+  if (totalOutLamports === null) return '--'
+  if (totalOutLamports <= BigInt(0)) return '0'
+  if (totalOutLamports < BigInt(1_000)) return '<0.000001'
+  return formatLamportsAsSol(totalOutLamports, 6)
 }
 
 async function mapWithConcurrency<T, R>(
@@ -145,10 +185,11 @@ export function Home() {
   const [selectedMints, setSelectedMints] = useState<Set<string>>(new Set())
   const [isSelling, setIsSelling] = useState(false)
   const [sellResults, setSellResults] = useState<Record<string, ExecutionResult>>({})
-  const [sellSummary, setSellSummary] = useState<string | null>(null)
+  const [sellSummary, setSellSummary] = useState<SellSummary | null>(null)
+  const [globalError, setGlobalError] = useState<string | null>(null)
   const [dustThresholdUsd, setDustThresholdUsd] = useState(5)
   const [sellEstimate, setSellEstimate] = useState<SellEstimate>({
-    totalSol: null,
+    totalOutLamports: null,
     quotedCount: 0,
     failedCount: 0,
     skippedCount: 0,
@@ -167,6 +208,7 @@ export function Home() {
       setSelectedMints(new Set())
       setSellResults({})
       setSellSummary(null)
+      setGlobalError(null)
     }
   }, [connected, publicKey])
 
@@ -194,10 +236,23 @@ export function Home() {
     return (Object.keys(sellResults).length / selectedMints.size) * 100
   }, [isSelling, sellResults, selectedMints])
 
+  const selectedSellableCount = useMemo(
+    () => tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token)).length,
+    [tokens, selectedMints]
+  )
+
+  const maxPriorityFeeLamports = useMemo(() => BigInt(getMaxPriorityFeeLamports()), [])
+
+  const estimatedFeeLamports = useMemo(() => {
+    if (selectedSellableCount === 0) return null
+    const baseNetworkFeeLamports = BigInt(5_000)
+    return BigInt(selectedSellableCount) * (baseNetworkFeeLamports + maxPriorityFeeLamports)
+  }, [selectedSellableCount, maxPriorityFeeLamports])
+
   useEffect(() => {
     if (!connected || isSelling || selectedMints.size === 0) {
       setSellEstimate({
-        totalSol: null,
+        totalOutLamports: null,
         quotedCount: 0,
         failedCount: 0,
         skippedCount: 0,
@@ -210,7 +265,7 @@ export function Home() {
     const selectedTokens = tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token))
     if (selectedTokens.length === 0) {
       setSellEstimate({
-        totalSol: null,
+        totalOutLamports: null,
         quotedCount: 0,
         failedCount: 0,
         skippedCount: 0,
@@ -280,9 +335,8 @@ export function Home() {
         if (result.failed) failedCount += 1
       }
 
-      const numericOut = Number(totalOutLamports)
       setSellEstimate({
-        totalSol: Number.isFinite(numericOut) ? numericOut / 1_000_000_000 : null,
+        totalOutLamports,
         quotedCount,
         failedCount,
         skippedCount,
@@ -303,6 +357,7 @@ export function Home() {
     const controller = new AbortController()
     fetchControllerRef.current = controller
 
+    setGlobalError(null)
     setLoading(true)
     setLoadingMore(false)
 
@@ -327,9 +382,16 @@ export function Home() {
         isVerified: isTokenVerified(token.metadata || null),
       }))
       setTokens(sortTokensByVerificationAndValue([...walletTokens]))
+      setGlobalError(null)
     } catch (error) {
       if (!controller.signal.aborted) {
         console.error('Error fetching tokens:', error)
+        if (error instanceof TokenServiceError) {
+          setGlobalError(error.message)
+        } else {
+          setGlobalError('Unable to fetch wallet tokens right now. Please retry.')
+        }
+        setTokens([])
       }
     } finally {
       if (!controller.signal.aborted) {
@@ -385,7 +447,8 @@ export function Home() {
 
     const rpcUrl = import.meta.env.VITE_SOLANA_RPC_URL
     if (!rpcUrl) {
-      setSellSummary('RPC URL not configured.')
+      setSellSummary(null)
+      setGlobalError('RPC URL not configured. Set VITE_SOLANA_RPC_URL and reconnect your wallet.')
       return
     }
 
@@ -401,6 +464,7 @@ export function Home() {
     let skipped = 0
 
     setIsSelling(true)
+    setGlobalError(null)
     setSellSummary(null)
     setSellResults({})
 
@@ -466,7 +530,7 @@ export function Home() {
     }
 
     setIsSelling(false)
-    setSellSummary(`${succeeded} sold, ${failed} failed, ${skipped} skipped.`)
+    setSellSummary({ sold: succeeded, failed, skipped })
 
     if (soldMints.size > 0) {
       setSelectedMints(prevSelected => {
@@ -477,14 +541,6 @@ export function Home() {
       await fetchTokens(publicKey.toBase58())
     }
   }
-
-  // ─── Derived: sell summary parsed ──────────────────────
-  const parsedSummary = useMemo(() => {
-    if (!sellSummary) return null
-    const match = sellSummary.match(/(\d+) sold, (\d+) failed, (\d+) skipped/)
-    if (!match) return null
-    return { sold: Number(match[1]), failed: Number(match[2]), skipped: Number(match[3]) }
-  }, [sellSummary])
 
   // ─── Render ──────────────────────────────────────────────
 
@@ -542,7 +598,7 @@ export function Home() {
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         </span>
                       ) : (
-                        <span>{formatSolEstimate(sellEstimate.totalSol)} <span className="text-sm text-muted-foreground">SOL</span></span>
+                        <span>{formatSolEstimate(sellEstimate.totalOutLamports)} <span className="text-sm text-muted-foreground">SOL</span></span>
                       )
                     ) : (
                       <span className="text-muted-foreground">0</span>
@@ -613,6 +669,11 @@ export function Home() {
                     {sellEstimate.quotedCount} quoted
                   </span>
                 )}
+                {estimatedFeeLamports !== null && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    est. fees ~ {formatLamportsAsSol(estimatedFeeLamports, 6)} SOL
+                  </span>
+                )}
 
                 <button
                   type="button"
@@ -658,28 +719,34 @@ export function Home() {
               </div>
             )}
 
+            {globalError && (
+              <div className="py-3.5 border-b border-border font-mono text-xs text-[hsl(var(--status-error))]">
+                {globalError}
+              </div>
+            )}
+
             {/* ── Sell summary ──────────────────────────────────── */}
-            {parsedSummary && (
+            {sellSummary && (
               <div
                 className="py-3.5 border-b border-border font-mono text-xs flex items-center gap-4"
                 style={{ animation: 'fadeUp 0.3s ease-out' }}
               >
-                {parsedSummary.sold > 0 && (
+                {sellSummary.sold > 0 && (
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block w-1.5 h-1.5 bg-[hsl(var(--status-success))]" />
-                    <span>{parsedSummary.sold} sold</span>
+                    <span>{sellSummary.sold} sold</span>
                   </span>
                 )}
-                {parsedSummary.failed > 0 && (
+                {sellSummary.failed > 0 && (
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block w-1.5 h-1.5 bg-[hsl(var(--status-error))]" />
-                    <span>{parsedSummary.failed} failed</span>
+                    <span>{sellSummary.failed} failed</span>
                   </span>
                 )}
-                {parsedSummary.skipped > 0 && (
+                {sellSummary.skipped > 0 && (
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block w-1.5 h-1.5 bg-muted-foreground/40" />
-                    <span className="text-muted-foreground">{parsedSummary.skipped} skipped</span>
+                    <span className="text-muted-foreground">{sellSummary.skipped} skipped</span>
                   </span>
                 )}
               </div>
@@ -843,7 +910,9 @@ export function Home() {
               </div>
             ) : (
               <div className="py-32 flex flex-col items-center gap-3">
-                <span className="font-mono text-xs text-muted-foreground">No tokens found in this wallet.</span>
+                <span className="font-mono text-xs text-muted-foreground">
+                  {globalError ? 'Unable to load tokens for this wallet.' : 'No tokens found in this wallet.'}
+                </span>
               </div>
             )}
 
