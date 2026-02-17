@@ -31,12 +31,12 @@ interface QuoteCacheEntry {
 const quoteCache = new Map<string, QuoteCacheEntry>()
 
 function getJupiterBaseUrl(): string {
-  const configured = process.env.NEXT_PUBLIC_JUPITER_SWAP_API_URL || 'https://api.jup.ag'
+  const configured = import.meta.env.VITE_JUPITER_SWAP_API_URL || 'https://api.jup.ag'
   return configured.replace(/\/+$/, '')
 }
 
 function getJupiterApiKey(): string | null {
-  return process.env.NEXT_PUBLIC_JUPITER_API_KEY || null
+  return import.meta.env.VITE_JUPITER_API_KEY || null
 }
 
 function getJupiterHeaders(extra: Record<string, string> = {}): Record<string, string> {

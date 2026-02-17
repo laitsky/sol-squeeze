@@ -84,12 +84,12 @@ function getFallbackTokenName(mint: string): string {
 }
 
 function getHeliusApiKey(): string | null {
-  const explicitKey = process.env.NEXT_PUBLIC_HELIUS_API_KEY;
+  const explicitKey = import.meta.env.VITE_HELIUS_API_KEY;
   if (explicitKey) {
     return explicitKey;
   }
 
-  const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL;
+  const rpcUrl = import.meta.env.VITE_SOLANA_RPC_URL;
   if (!rpcUrl) {
     return null;
   }
@@ -98,13 +98,13 @@ function getHeliusApiKey(): string | null {
     const parsedUrl = new URL(rpcUrl);
     return parsedUrl.searchParams.get('api-key');
   } catch (error) {
-    console.warn('Failed to parse NEXT_PUBLIC_SOLANA_RPC_URL for api-key:', error);
+    console.warn('Failed to parse VITE_SOLANA_RPC_URL for api-key:', error);
     return null;
   }
 }
 
 function getHeliusWalletApiBaseUrl(): string {
-  const baseUrl = process.env.NEXT_PUBLIC_HELIUS_WALLET_API_URL || 'https://api.helius.xyz';
+  const baseUrl = import.meta.env.VITE_HELIUS_WALLET_API_URL || 'https://api.helius.xyz';
   return baseUrl.replace(/\/+$/, '');
 }
 
@@ -118,7 +118,7 @@ export async function fetchWalletTokenBalances(
 
   const apiKey = getHeliusApiKey();
   if (!apiKey) {
-    console.error('Helius API key missing. Set NEXT_PUBLIC_HELIUS_API_KEY or include api-key in NEXT_PUBLIC_SOLANA_RPC_URL.');
+    console.error('Helius API key missing. Set VITE_HELIUS_API_KEY or include api-key in VITE_SOLANA_RPC_URL.');
     return [];
   }
 

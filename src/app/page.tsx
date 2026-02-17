@@ -1,5 +1,3 @@
-'use client'
-
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { Connection } from '@solana/web3.js'
@@ -139,7 +137,7 @@ function truncateAddress(address: string): string {
   return `${address.slice(0, 4)}...${address.slice(-4)}`
 }
 
-export default function Home() {
+export function Home() {
   const { publicKey, connected, sendTransaction } = useWallet()
   const [tokens, setTokens] = useState<Token[]>([])
   const [loading, setLoading] = useState(false)
@@ -385,7 +383,7 @@ export default function Home() {
       return
     }
 
-    const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL
+    const rpcUrl = import.meta.env.VITE_SOLANA_RPC_URL
     if (!rpcUrl) {
       setSellSummary('RPC URL not configured.')
       return
