@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
-import { Connection, VersionedTransaction } from '@solana/web3.js'
+import { Connection, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js'
+import { createBurnCheckedInstruction, createCloseAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token'
 import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -46,6 +47,8 @@ type SlippagePreset = '0.5' | '1' | '3' | 'custom'
 type TokenSort = 'value' | 'name' | 'verification'
 type VerificationFilter = 'all' | 'unverified'
 type ToastType = 'error' | 'info' | 'success'
+type TradabilityStatus = 'unknown' | 'checking' | 'tradable' | 'untradable' | 'error'
+type UsdQuoteStatus = 'unknown' | 'checking' | 'priced' | 'unavailable' | 'error'
 
 interface ExecutionResult {
   state: ExecutionState
@@ -79,6 +82,15 @@ interface PreparedSwap {
   token: Token
   transaction: VersionedTransaction
   lastValidBlockHeight: number
+  outLamportsEstimate: bigint
+}
+
+interface CleanupTokenAccount {
+  address: PublicKey
+  amountRaw: bigint
+  decimals: number
+  lamports: bigint
+  programId: PublicKey
 }
 
 interface ToastItem {
@@ -118,6 +130,12 @@ const SIGNING_BATCH_SIZE = 6
 const ESTIMATE_QUOTE_TTL_MS = 15_000
 const RECENT_ACTIVITY_STORAGE_KEY = 'sol-squeeze-recent-activity-v1'
 const DEFAULT_DUST_THRESHOLD_USD = 5
+const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+const TRADEABILITY_PROBE_BATCH_SIZE = 30
+const TRADEABILITY_PROBE_CONCURRENCY = 6
+const LAZY_PROBE_INITIAL_LIMIT = 60
+const LAZY_PROBE_STEP = 40
+const LAZY_PROBE_SCROLL_OFFSET_PX = 900
 
 function isSellableToken(token: Token): boolean {
   return token.amount > 0 && token.mint !== SOL_MINT
@@ -241,6 +259,10 @@ function tokenValueUsd(token: Token): number | null {
   return null
 }
 
+function hasValidTokenPrice(token: Token): boolean {
+  return typeof token.price === 'number' && Number.isFinite(token.price) && token.price > 0
+}
+
 function tokenLabel(token: Token): string {
   const symbol = token.metadata?.symbol?.trim()
   if (symbol) return symbol
@@ -266,6 +288,60 @@ function quoteFailureMessage(token: Token, error: unknown): string {
 
 function swapFailureMessage(token: Token, error: unknown): string {
   return `Swap failed for ${tokenLabel(token)}: ${errorMessage(error)}`
+}
+
+function parseUnsignedBigInt(value: unknown): bigint | null {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  return BigInt(value)
+}
+
+async function findCleanupTokenAccount(
+  connection: Connection,
+  owner: PublicKey,
+  mint: PublicKey
+): Promise<CleanupTokenAccount | null> {
+  const tokenAccounts = await connection.getParsedTokenAccountsByOwner(owner, { mint }, 'confirmed')
+
+  let selected: CleanupTokenAccount | null = null
+  for (const tokenAccount of tokenAccounts.value) {
+    const accountData = tokenAccount.account.data
+    if (typeof accountData !== 'object' || accountData === null || !('parsed' in accountData)) {
+      continue
+    }
+
+    const info = (
+      accountData as {
+        parsed?: {
+          info?: {
+            tokenAmount?: {
+              amount?: unknown
+              decimals?: unknown
+            }
+          }
+        }
+      }
+    ).parsed?.info
+
+    const amountRaw = parseUnsignedBigInt(info?.tokenAmount?.amount)
+    if (amountRaw === null || amountRaw <= BigInt(0)) {
+      continue
+    }
+
+    const decimals = typeof info?.tokenAmount?.decimals === 'number' ? info.tokenAmount.decimals : 0
+    const candidate: CleanupTokenAccount = {
+      address: tokenAccount.pubkey,
+      amountRaw,
+      decimals,
+      lamports: BigInt(tokenAccount.account.lamports),
+      programId: tokenAccount.account.owner || TOKEN_PROGRAM_ID,
+    }
+
+    if (!selected || candidate.amountRaw > selected.amountRaw) {
+      selected = candidate
+    }
+  }
+
+  return selected
 }
 
 function slippagePresetBps(preset: Exclude<SlippagePreset, 'custom'>): number {
@@ -369,6 +445,11 @@ export function Home() {
   const [searchQuery, setSearchQuery] = useState('')
   const [verificationFilter, setVerificationFilter] = useState<VerificationFilter>('all')
   const [sortBy, setSortBy] = useState<TokenSort>('verification')
+  const [hideNoRouteTokens, setHideNoRouteTokens] = useState(true)
+  const [hideUnverifiedTokens, setHideUnverifiedTokens] = useState(true)
+  const [tradabilityByMint, setTradabilityByMint] = useState<Record<string, TradabilityStatus>>({})
+  const [usdQuoteStatusByMint, setUsdQuoteStatusByMint] = useState<Record<string, UsdQuoteStatus>>({})
+  const [tokenProbeLimit, setTokenProbeLimit] = useState(LAZY_PROBE_INITIAL_LIMIT)
 
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [recentActivity, setRecentActivity] = useState<RecentActivityItem[]>([])
@@ -400,11 +481,22 @@ export function Home() {
   const walletConnectedRef = useRef(connected)
   const walletAddressRef = useRef(publicKey?.toBase58() || null)
   const shareCopiedResetTimerRef = useRef<number | null>(null)
+  const tradabilityProbeControllerRef = useRef<AbortController | null>(null)
+  const tradabilityByMintRef = useRef<Record<string, TradabilityStatus>>({})
+  const usdQuoteStatusByMintRef = useRef<Record<string, UsdQuoteStatus>>({})
 
   useEffect(() => {
     walletConnectedRef.current = connected
     walletAddressRef.current = publicKey?.toBase58() || null
   }, [connected, publicKey])
+
+  useEffect(() => {
+    tradabilityByMintRef.current = tradabilityByMint
+  }, [tradabilityByMint])
+
+  useEffect(() => {
+    usdQuoteStatusByMintRef.current = usdQuoteStatusByMint
+  }, [usdQuoteStatusByMint])
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -442,6 +534,7 @@ export function Home() {
       if (shareCopiedResetTimerRef.current !== null) {
         window.clearTimeout(shareCopiedResetTimerRef.current)
       }
+      tradabilityProbeControllerRef.current?.abort()
     }
   }, [])
 
@@ -523,6 +616,7 @@ export function Home() {
       fetchTokens(publicKey.toBase58())
     } else {
       fetchControllerRef.current?.abort()
+      tradabilityProbeControllerRef.current?.abort()
       setTokens([])
       setSelectedMints(new Set())
       setSellResults({})
@@ -530,16 +624,319 @@ export function Home() {
       setGlobalError(null)
       setIsConfirmModalOpen(false)
       setCurrentRunMints(new Set())
+      setTradabilityByMint({})
+      setUsdQuoteStatusByMint({})
+      setTokenProbeLimit(LAZY_PROBE_INITIAL_LIMIT)
     }
   }, [connected, publicKey])
 
   useEffect(() => {
+    const currentMints = new Set(tokens.map(token => token.mint))
+
+    setTradabilityByMint(prev => {
+      const next: Record<string, TradabilityStatus> = {}
+      let changed = false
+      for (const [mint, status] of Object.entries(prev)) {
+        if (currentMints.has(mint)) {
+          next[mint] = status
+        } else {
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+
+    setUsdQuoteStatusByMint(prev => {
+      const next: Record<string, UsdQuoteStatus> = {}
+      let changed = false
+      for (const [mint, status] of Object.entries(prev)) {
+        if (currentMints.has(mint)) {
+          next[mint] = status
+        } else {
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [tokens])
+
+  useEffect(() => {
+    setTokenProbeLimit(LAZY_PROBE_INITIAL_LIMIT)
+  }, [connected, publicKey, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens])
+
+  useEffect(() => {
+    if (!connected) {
+      return
+    }
+
+    const onScroll = () => {
+      const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - LAZY_PROBE_SCROLL_OFFSET_PX
+      if (!nearBottom) return
+      setTokenProbeLimit(prev => Math.min(prev + LAZY_PROBE_STEP, tokens.length))
+    }
+
+    onScroll()
+    window.addEventListener('scroll', onScroll, { passive: true })
+
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+    }
+  }, [connected, tokens.length, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens])
+
+  useEffect(() => {
+    tradabilityProbeControllerRef.current?.abort()
+    setTradabilityByMint(prev => {
+      let changed = false
+      const next = { ...prev }
+      for (const [mint, status] of Object.entries(next)) {
+        if (status === 'checking') {
+          next[mint] = 'unknown'
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+    setUsdQuoteStatusByMint(prev => {
+      let changed = false
+      const next = { ...prev }
+      for (const [mint, status] of Object.entries(next)) {
+        if (status === 'checking') {
+          next[mint] = 'unknown'
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+
+    if (!connected || !publicKey || isSelling) {
+      return
+    }
+
+    const tradabilitySnapshot = tradabilityByMintRef.current
+    const normalizedQuery = searchQuery.trim().toLowerCase()
+    const visibleProbeTokens = sortTokens(tokens.filter(token => {
+      const verificationLevel = getVerificationLevel(token.metadata || null)
+      const hasNoValueAndNoRoute = tradabilitySnapshot[token.mint] === 'untradable' && tokenValueUsd(token) === null
+
+      if (hasNoValueAndNoRoute) return false
+      if (hideNoRouteTokens && tradabilitySnapshot[token.mint] === 'untradable') return false
+      if (verificationFilter === 'unverified' && verificationLevel !== 'unverified') return false
+      if (verificationFilter !== 'unverified' && hideUnverifiedTokens && verificationLevel === 'unverified') return false
+
+      if (!normalizedQuery) return true
+      const searchParts = [
+        token.metadata?.name || '',
+        token.metadata?.symbol || '',
+        token.mint,
+      ]
+      return searchParts.some(part => part.toLowerCase().includes(normalizedQuery))
+    }), sortBy)
+
+    const probeTargets = visibleProbeTokens.filter(isSellableToken).slice(0, tokenProbeLimit)
+    const probeCandidates = probeTargets.filter(token => {
+      const tradabilityStatus = tradabilityByMintRef.current[token.mint]
+      const usdQuoteStatus = usdQuoteStatusByMintRef.current[token.mint]
+      const needsTradability = tradabilityStatus !== 'tradable' && tradabilityStatus !== 'untradable' && tradabilityStatus !== 'checking'
+      const needsImpliedUsd = !hasValidTokenPrice(token)
+        && usdQuoteStatus !== 'priced'
+        && usdQuoteStatus !== 'unavailable'
+        && usdQuoteStatus !== 'checking'
+      return needsTradability || needsImpliedUsd
+    })
+
+    if (probeCandidates.length === 0) {
+      return
+    }
+
+    const controller = new AbortController()
+    tradabilityProbeControllerRef.current = controller
+
+    const run = async () => {
+      for (let index = 0; index < probeCandidates.length; index += TRADEABILITY_PROBE_BATCH_SIZE) {
+        if (controller.signal.aborted) return
+
+        const batch = probeCandidates.slice(index, index + TRADEABILITY_PROBE_BATCH_SIZE)
+
+        setTradabilityByMint(prev => {
+          const next = { ...prev }
+          for (const token of batch) {
+            const status = next[token.mint]
+            if (status !== 'tradable' && status !== 'untradable') {
+              next[token.mint] = 'checking'
+            }
+          }
+          return next
+        })
+
+        setUsdQuoteStatusByMint(prev => {
+          const next = { ...prev }
+          for (const token of batch) {
+            if (hasValidTokenPrice(token)) continue
+            const status = next[token.mint]
+            if (status !== 'priced' && status !== 'unavailable') {
+              next[token.mint] = 'checking'
+            }
+          }
+          return next
+        })
+
+        const outcomes = await mapWithConcurrency(batch, TRADEABILITY_PROBE_CONCURRENCY, async token => {
+          const currentTradabilityStatus = tradabilityByMintRef.current[token.mint]
+          const currentUsdQuoteStatus = usdQuoteStatusByMintRef.current[token.mint]
+          const decimals = token.metadata?.decimals ?? 0
+          const rawAmount = toRawAmount(token.amount, decimals)
+          if (rawAmount === '0') {
+            return {
+              mint: token.mint,
+              tradabilityStatus: 'untradable' as TradabilityStatus,
+              usdQuoteStatus: 'unavailable' as UsdQuoteStatus,
+            }
+          }
+
+          let tradabilityStatus: TradabilityStatus = currentTradabilityStatus || 'unknown'
+          if (tradabilityStatus !== 'tradable' && tradabilityStatus !== 'untradable') {
+            try {
+              await getJupiterQuote({
+                inputMint: token.mint,
+                outputMint: SOL_MINT,
+                amount: rawAmount,
+                slippageBps: effectiveSlippageBps,
+                signal: controller.signal,
+                cacheTtlMs: 60_000,
+              })
+              tradabilityStatus = 'tradable'
+            } catch (error) {
+              if (controller.signal.aborted) {
+                tradabilityStatus = 'unknown'
+              } else {
+                tradabilityStatus = hasNoRouteError(errorMessage(error)) ? 'untradable' : 'error'
+              }
+            }
+          }
+
+          let usdQuoteStatus: UsdQuoteStatus = currentUsdQuoteStatus || 'unknown'
+          let impliedPrice: number | null = null
+          if (!hasValidTokenPrice(token) && usdQuoteStatus !== 'priced' && usdQuoteStatus !== 'unavailable') {
+            if (tradabilityStatus === 'untradable') {
+              usdQuoteStatus = 'unavailable'
+            } else {
+              try {
+                const usdQuote = await getJupiterQuote({
+                  inputMint: token.mint,
+                  outputMint: USDC_MINT,
+                  amount: rawAmount,
+                  slippageBps: effectiveSlippageBps,
+                  signal: controller.signal,
+                  cacheTtlMs: 60_000,
+                })
+                const outAmountRaw = getQuoteOutAmountRaw(usdQuote)
+                if (outAmountRaw) {
+                  const impliedUsdTotal = Number(outAmountRaw) / 1_000_000
+                  const impliedUnitPrice = impliedUsdTotal / token.amount
+                  if (Number.isFinite(impliedUnitPrice) && impliedUnitPrice > 0) {
+                    impliedPrice = impliedUnitPrice
+                    usdQuoteStatus = 'priced'
+                  } else {
+                    usdQuoteStatus = 'unavailable'
+                  }
+                } else {
+                  usdQuoteStatus = 'unavailable'
+                }
+              } catch (error) {
+                if (controller.signal.aborted) {
+                  usdQuoteStatus = 'unknown'
+                } else {
+                  usdQuoteStatus = hasNoRouteError(errorMessage(error)) ? 'unavailable' : 'error'
+                }
+              }
+            }
+          }
+
+          return {
+            mint: token.mint,
+            tradabilityStatus,
+            usdQuoteStatus,
+            impliedPrice,
+          }
+        })
+
+        if (controller.signal.aborted) return
+
+        setTradabilityByMint(prev => {
+          const next = { ...prev }
+          for (const outcome of outcomes) {
+            next[outcome.mint] = outcome.tradabilityStatus
+          }
+          return next
+        })
+
+        setUsdQuoteStatusByMint(prev => {
+          const next = { ...prev }
+          for (const outcome of outcomes) {
+            next[outcome.mint] = outcome.usdQuoteStatus
+          }
+          return next
+        })
+
+        setTokens(prevTokens => {
+          let changed = false
+          const byMint = new Map(outcomes.map(outcome => [outcome.mint, outcome]))
+          const nextTokens = prevTokens.map(token => {
+            const outcome = byMint.get(token.mint)
+            if (!outcome || outcome.impliedPrice === null || hasValidTokenPrice(token)) {
+              return token
+            }
+            changed = true
+            return {
+              ...token,
+              price: outcome.impliedPrice,
+              priceFetched: true,
+            }
+          })
+          return changed ? nextTokens : prevTokens
+        })
+      }
+    }
+
+    void run()
+
+    return () => {
+      controller.abort()
+    }
+  }, [
+    connected,
+    publicKey,
+    isSelling,
+    tokens,
+    tokenProbeLimit,
+    effectiveSlippageBps,
+    searchQuery,
+    verificationFilter,
+    sortBy,
+    hideNoRouteTokens,
+    hideUnverifiedTokens,
+  ])
+
+  useEffect(() => {
     setSelectedMints(prevSelected => {
-      const tokenMints = new Set(tokens.filter(isSellableToken).map(token => token.mint))
+      const tokenMints = new Set(
+        tokens
+          .filter(token => (
+            isSellableToken(token)
+            && !(tradabilityByMint[token.mint] === 'untradable' && tokenValueUsd(token) === null)
+            && (!hideNoRouteTokens || tradabilityByMint[token.mint] !== 'untradable')
+            && (
+              verificationFilter === 'unverified'
+              || !hideUnverifiedTokens
+              || getVerificationLevel(token.metadata || null) !== 'unverified'
+            )
+          ))
+          .map(token => token.mint)
+      )
       const nextSelected = new Set(Array.from(prevSelected).filter(mint => tokenMints.has(mint)))
       return nextSelected
     })
-  }, [tokens])
+  }, [tokens, hideNoRouteTokens, hideUnverifiedTokens, tradabilityByMint, verificationFilter])
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
 
@@ -547,7 +944,22 @@ export function Home() {
     const normalizedQuery = searchQuery.trim().toLowerCase()
 
     const filteredTokens = tokens.filter(token => {
-      if (verificationFilter === 'unverified' && getVerificationLevel(token.metadata || null) !== 'unverified') {
+      const verificationLevel = getVerificationLevel(token.metadata || null)
+      const hasNoValueAndNoRoute = tradabilityByMint[token.mint] === 'untradable' && tokenValueUsd(token) === null
+
+      if (hasNoValueAndNoRoute) {
+        return false
+      }
+
+      if (hideNoRouteTokens && tradabilityByMint[token.mint] === 'untradable') {
+        return false
+      }
+
+      if (verificationFilter === 'unverified' && verificationLevel !== 'unverified') {
+        return false
+      }
+
+      if (verificationFilter !== 'unverified' && hideUnverifiedTokens && verificationLevel === 'unverified') {
         return false
       }
 
@@ -565,11 +977,33 @@ export function Home() {
     })
 
     return sortTokens(filteredTokens, sortBy)
-  }, [tokens, searchQuery, verificationFilter, sortBy])
+  }, [tokens, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens, tradabilityByMint])
 
   const visibleSellableTokens = useMemo(
     () => visibleTokens.filter(isSellableToken),
     [visibleTokens]
+  )
+
+  const noRouteTokenCount = useMemo(
+    () => sellableTokens.filter(token => tradabilityByMint[token.mint] === 'untradable').length,
+    [sellableTokens, tradabilityByMint]
+  )
+
+  const noValueNoRouteTokenCount = useMemo(
+    () => sellableTokens.filter(token => tradabilityByMint[token.mint] === 'untradable' && tokenValueUsd(token) === null).length,
+    [sellableTokens, tradabilityByMint]
+  )
+
+  const unverifiedTokenCount = useMemo(
+    () => sellableTokens.filter(token => getVerificationLevel(token.metadata || null) === 'unverified').length,
+    [sellableTokens]
+  )
+
+  const tradabilityChecksInFlight = useMemo(
+    () => sellableTokens.filter(token => (
+      tradabilityByMint[token.mint] === 'checking' || usdQuoteStatusByMint[token.mint] === 'checking'
+    )).length,
+    [sellableTokens, tradabilityByMint, usdQuoteStatusByMint]
   )
 
   const totalPortfolioValue = useMemo(() => {
@@ -896,6 +1330,50 @@ export function Home() {
     }
   }
 
+  async function executeNoLiquidityCleanup(
+    connection: Connection,
+    ownerAddress: string,
+    token: Token
+  ): Promise<{ signature: string; reclaimedLamports: bigint }> {
+    const ownerPublicKey = new PublicKey(ownerAddress)
+    const mintPublicKey = new PublicKey(token.mint)
+    const tokenAccount = await findCleanupTokenAccount(connection, ownerPublicKey, mintPublicKey)
+
+    if (!tokenAccount) {
+      throw new Error('Token account with a positive balance was not found.')
+    }
+
+    const transaction = new Transaction().add(
+      createBurnCheckedInstruction(
+        tokenAccount.address,
+        mintPublicKey,
+        ownerPublicKey,
+        tokenAccount.amountRaw,
+        tokenAccount.decimals,
+        [],
+        tokenAccount.programId
+      ),
+      createCloseAccountInstruction(
+        tokenAccount.address,
+        ownerPublicKey,
+        ownerPublicKey,
+        [],
+        tokenAccount.programId
+      )
+    )
+
+    const signature = await sendTransaction(transaction, connection, {
+      skipPreflight: false,
+      maxRetries: 3,
+      preflightCommitment: 'confirmed',
+    })
+
+    return {
+      signature,
+      reclaimedLamports: tokenAccount.lamports,
+    }
+  }
+
   async function executeSellRun(targetTokens: Token[], options: { resetResults: boolean; resetSummary: boolean }) {
     if (!connected || !publicKey || isSelling) {
       return
@@ -917,10 +1395,13 @@ export function Home() {
     const connection = new Connection(rpcUrl, 'confirmed')
     const soldMints = new Set<string>()
     const runTargetCount = targetTokens.filter(isSellableToken).length
-    const runEstimateSnapshot = options.resetSummary ? sellEstimate.totalOutLamports : null
     let succeeded = 0
     let failed = 0
     let skipped = 0
+    let confirmedSwaps = 0
+    let confirmedCleanups = 0
+    let swapOutLamportsEstimate = BigInt(0)
+    let cleanupLamportsRecovered = BigInt(0)
     let disconnectionHandled = false
 
     const isWalletSessionValid = () => {
@@ -940,6 +1421,54 @@ export function Home() {
       const message = 'Wallet disconnected mid-batch. Reconnect wallet and retry failed tokens.'
       markFailedForTokens(remainingTokens, message)
       pushToast('error', `Wallet disconnected during batch on ${wallet?.adapter.name || 'wallet'}.`)
+    }
+
+    const handleNoRouteFallback = async (token: Token): Promise<void> => {
+      updateSellResult(token.mint, {
+        state: 'building',
+        message: 'No route found. Burning and closing token account...',
+      })
+
+      try {
+        const { signature, reclaimedLamports } = await executeNoLiquidityCleanup(connection, ownerAddress, token)
+
+        updateSellResult(token.mint, {
+          state: 'submitted',
+          signature,
+          message: 'Confirming burn + close...',
+        })
+
+        const confirmation = await connection.confirmTransaction(signature, 'confirmed')
+        if (confirmation.value.err) {
+          throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
+        }
+
+        succeeded += 1
+        confirmedCleanups += 1
+        cleanupLamportsRecovered += reclaimedLamports
+        soldMints.add(token.mint)
+        updateSellResult(token.mint, {
+          state: 'confirmed',
+          signature,
+          message: 'Burned + closed (no liquidity route).',
+        })
+        addRecentActivity({
+          signature,
+          mint: token.mint,
+          tokenLabel: tokenLabel(token),
+          tokenAmount: token.amount,
+        })
+      } catch (cleanupError) {
+        failed += 1
+        const message = `No route for ${tokenLabel(token)}. Burn+close fallback failed: ${errorMessage(cleanupError)}`
+        updateSellResult(token.mint, { state: 'failed', message })
+        pushToast('error', message, {
+          label: 'Retry',
+          onClick: () => {
+            void retryToken(token.mint)
+          },
+        })
+      }
     }
 
     setIsSelling(true)
@@ -996,6 +1525,10 @@ export function Home() {
               slippageBps: effectiveSlippageBps,
             })
           } catch (error) {
+            if (hasNoRouteError(errorMessage(error))) {
+              await handleNoRouteFallback(token)
+              continue
+            }
             const message = quoteFailureMessage(token, error)
             failed += 1
             updateSellResult(token.mint, { state: 'failed', message })
@@ -1013,13 +1546,19 @@ export function Home() {
               quoteResponse,
               userPublicKey: ownerAddress,
             })
+            const outAmountRaw = getQuoteOutAmountRaw(quoteResponse)
 
             preparedSwaps.push({
               token,
               transaction,
               lastValidBlockHeight,
+              outLamportsEstimate: outAmountRaw ? BigInt(outAmountRaw) : BigInt(0),
             })
           } catch (error) {
+            if (hasNoRouteError(errorMessage(error))) {
+              await handleNoRouteFallback(token)
+              continue
+            }
             const message = `Swap build failed for ${tokenLabel(token)}: ${errorMessage(error)}`
             failed += 1
             updateSellResult(token.mint, { state: 'failed', message })
@@ -1114,6 +1653,8 @@ export function Home() {
                 }
 
                 succeeded += 1
+                confirmedSwaps += 1
+                swapOutLamportsEstimate += preparedSwap.outLamportsEstimate
                 soldMints.add(preparedSwap.token.mint)
                 updateSellResult(preparedSwap.token.mint, {
                   state: 'confirmed',
@@ -1174,6 +1715,8 @@ export function Home() {
               }
 
               succeeded += 1
+              confirmedSwaps += 1
+              swapOutLamportsEstimate += preparedSwap.outLamportsEstimate
               soldMints.add(preparedSwap.token.mint)
               updateSellResult(preparedSwap.token.mint, { state: 'confirmed', signature, message: 'Done.' })
               addRecentActivity({
@@ -1201,19 +1744,25 @@ export function Home() {
         setSellSummary({ sold: succeeded, failed, skipped })
       }
 
-      appendBatchProgressEvent(`Finished: ${succeeded} confirmed, ${failed} failed, ${skipped} skipped.`)
+      appendBatchProgressEvent(
+        `Finished: ${succeeded} confirmed (${confirmedSwaps} swaps, ${confirmedCleanups} burn+close), ${failed} failed, ${skipped} skipped.`
+      )
 
       if (succeeded > 0) {
-        const reclaimedLamportsEstimate = runEstimateSnapshot !== null && runTargetCount > 0
-          ? (runEstimateSnapshot * BigInt(succeeded)) / BigInt(runTargetCount)
-          : null
+        const reclaimedLamportsEstimate = swapOutLamportsEstimate + cleanupLamportsRecovered
         setShareResultSummary({
           soldCount: succeeded,
           attemptedCount: runTargetCount,
           reclaimedLamportsEstimate,
         })
         setShareCaptionCopied(false)
-        pushToast('success', `Confirmed ${succeeded} swap${succeeded > 1 ? 's' : ''}.`)
+        if (confirmedSwaps > 0 && confirmedCleanups > 0) {
+          pushToast('success', `Confirmed ${succeeded} actions (${confirmedSwaps} swaps, ${confirmedCleanups} burn+close).`)
+        } else if (confirmedCleanups > 0) {
+          pushToast('success', `Confirmed ${confirmedCleanups} burn+close cleanup${confirmedCleanups > 1 ? 's' : ''}.`)
+        } else {
+          pushToast('success', `Confirmed ${confirmedSwaps} swap${confirmedSwaps > 1 ? 's' : ''}.`)
+        }
       }
 
       if (soldMints.size > 0) {
@@ -1437,6 +1986,24 @@ export function Home() {
                   </select>
                 </div>
 
+                <button
+                  type="button"
+                  onClick={() => setHideNoRouteTokens(prev => !prev)}
+                  disabled={isSelling}
+                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
+                >
+                  {hideNoRouteTokens ? 'show no-route' : 'hide no-route'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setHideUnverifiedTokens(prev => !prev)}
+                  disabled={isSelling}
+                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
+                >
+                  {hideUnverifiedTokens ? 'show unverified' : 'hide unverified'}
+                </button>
+
                 <div className="flex items-center gap-1.5 bg-muted/50 h-7 px-2">
                   <span className="text-muted-foreground text-[10px] uppercase tracking-wider">sort</span>
                   <select
@@ -1536,6 +2103,30 @@ export function Home() {
 
                 {sellEstimate.error && (
                   <span className="text-[hsl(var(--status-warning))] text-[11px]">{sellEstimate.error}</span>
+                )}
+
+                {tradabilityChecksInFlight > 0 && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    quote checks {tradabilityChecksInFlight}
+                  </span>
+                )}
+
+                {noValueNoRouteTokenCount > 0 && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    {noValueNoRouteTokenCount} junk hidden
+                  </span>
+                )}
+
+                {hideNoRouteTokens && noRouteTokenCount > 0 && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    {noRouteTokenCount} no-route hidden
+                  </span>
+                )}
+
+                {verificationFilter !== 'unverified' && hideUnverifiedTokens && unverifiedTokenCount > 0 && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    {unverifiedTokenCount} unverified hidden
+                  </span>
                 )}
 
                 {selectedSellableCount > 0 && !sellEstimate.loading && sellEstimate.quotedCount > 0 && (
@@ -1805,8 +2396,16 @@ export function Home() {
                     const selected = selectedMints.has(token.mint)
                     const sellable = isSellableToken(token)
                     const verificationLevel = getVerificationLevel(token.metadata || null)
+                    const tradabilityStatus = tradabilityByMint[token.mint]
+                    const usdQuoteStatus = usdQuoteStatusByMint[token.mint]
+                    const tokenStatusLabel = sellable && tradabilityStatus === 'untradable'
+                      ? 'no-route'
+                      : sellable && tradabilityStatus === 'checking'
+                        ? 'checking'
+                        : verificationLevel
                     const txUrl = execution?.signature ? `https://solscan.io/tx/${execution.signature}` : null
                     const usdValue = tokenValueUsd(token)
+                    const usdValueResolving = usdQuoteStatus === 'checking' || usdQuoteStatus === 'unknown'
                     const name = token.metadata
                       ? getTokenDisplayName(token.mint, token.metadata)
                       : 'Unknown'
@@ -1863,11 +2462,13 @@ export function Home() {
                               </div>
                               <span className={cn(
                                 'mt-1 block font-mono text-[9px] uppercase tracking-wider md:hidden',
-                                verificationLevel === 'strict' || verificationLevel === 'verified'
+                                tokenStatusLabel === 'no-route'
+                                  ? 'text-[hsl(var(--status-warning))]'
+                                  : verificationLevel === 'strict' || verificationLevel === 'verified'
                                   ? 'text-foreground/40'
                                   : 'text-muted-foreground/60'
                               )}>
-                                {verificationLevel}
+                                {tokenStatusLabel}
                               </span>
                             </div>
                           </div>
@@ -1875,11 +2476,13 @@ export function Home() {
                           <div className="hidden md:block">
                             <span className={cn(
                               'font-mono text-[10px] uppercase tracking-wider',
-                              verificationLevel === 'strict' || verificationLevel === 'verified'
+                              tokenStatusLabel === 'no-route'
+                                ? 'text-[hsl(var(--status-warning))]'
+                                : verificationLevel === 'strict' || verificationLevel === 'verified'
                                 ? 'text-foreground/50'
                                 : 'text-muted-foreground/60'
                             )}>
-                              {verificationLevel}
+                              {tokenStatusLabel}
                             </span>
                           </div>
 
@@ -1896,7 +2499,7 @@ export function Home() {
                             )}>
                               {usdValue !== null
                                 ? formatPrice(usdValue)
-                                : token.priceFetched ? '--' : '...'}
+                                : usdValueResolving ? '...' : '--'}
                             </span>
                             <span className="block md:hidden font-mono text-[10px] text-muted-foreground/50 tabular-nums">
                               {token.amount?.toLocaleString() || '0'}
@@ -1945,7 +2548,9 @@ export function Home() {
               ) : (
                 <div className="py-20 flex flex-col items-center gap-3">
                   <span className="font-mono text-xs text-muted-foreground">
-                    No tokens match current search/filter settings.
+                    {noValueNoRouteTokenCount > 0 || (hideNoRouteTokens && noRouteTokenCount > 0) || (hideUnverifiedTokens && unverifiedTokenCount > 0)
+                      ? 'No tokens match current filters. Try "show no-route" or "show unverified".'
+                      : 'No tokens match current search/filter settings.'}
                   </span>
                 </div>
               )
