@@ -10,6 +10,7 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import Navbar from '../components/Navbar'
+import Footer from '../components/Footer'
 import {
   displayAmountFromRaw,
   fetchWalletTokenBalances,
@@ -2648,6 +2649,8 @@ export function Home({ active = true }: { active?: boolean }) {
           </div>
         )}
       </main>
+
+      <Footer />
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import Navbar from '../components/Navbar'
+import Footer from '../components/Footer'
 
 export function HowItWorksPage() {
   return (
@@ -44,6 +45,8 @@ export function HowItWorksPage() {
           </div>
         </div>
       </main>
+
+      <Footer />
     </>
   )
 }
