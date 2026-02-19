@@ -251,6 +251,27 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+const FETCH_PAGE_SIZE = 100;
+const FETCH_MAX_PAGES = 50;
+const FETCH_PARALLEL_BATCH = 2;
+const FETCH_INTER_BATCH_DELAY_MS = 150;
+const FETCH_MAX_RETRIES = 3;
+const FETCH_RETRY_BASE_DELAY_MS = 500;
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  });
+}
+
 export async function fetchWalletTokenBalances(
   walletAddress: string,
   options?: FetchTokensOptions
@@ -262,37 +283,50 @@ export async function fetchWalletTokenBalances(
   const signal = options?.signal;
   const onFirstPage = options?.onFirstPage;
   const tokenMap = new Map<string, WalletTokenBalance>();
-  const pageSize = 100;
-  const maxPages = 50;
-  const PARALLEL_BATCH = 4;
 
   async function fetchPage(page: number): Promise<HeliusWalletBalancesResponse> {
-    const params = new URLSearchParams({
-      page: page.toString(),
-      limit: pageSize.toString(),
-    });
+    let lastError: unknown;
 
-    const response = await fetch(
-      `${apiUrl(`/api/wallet/${encodeURIComponent(walletAddress)}/balances`)}?${params.toString()}`,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-        },
-        signal,
+    for (let attempt = 0; attempt <= FETCH_MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const backoff = FETCH_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        await delay(backoff, signal);
       }
-    );
 
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      const apiError =
-        payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
-          ? payload.error
-          : null;
-      throw new Error(apiError || `Wallet API returned ${response.status}`);
+      const params = new URLSearchParams({
+        page: page.toString(),
+        limit: FETCH_PAGE_SIZE.toString(),
+      });
+
+      const response = await fetch(
+        `${apiUrl(`/api/wallet/${encodeURIComponent(walletAddress)}/balances`)}?${params.toString()}`,
+        {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+          },
+          signal,
+        }
+      );
+
+      if (response.status === 429 || response.status >= 500) {
+        lastError = new Error(`Wallet API returned ${response.status}`);
+        if (attempt < FETCH_MAX_RETRIES) continue;
+      }
+
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const apiError =
+          payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+            ? payload.error
+            : null;
+        throw new Error(apiError || `Wallet API returned ${response.status}`);
+      }
+
+      return (payload || {}) as HeliusWalletBalancesResponse;
     }
 
-    return (payload || {}) as HeliusWalletBalancesResponse;
+    throw lastError;
   }
 
   function processBalances(balances: HeliusWalletBalance[]) {
@@ -364,14 +398,14 @@ export async function fetchWalletTokenBalances(
       return Array.from(tokenMap.values());
     }
 
-    // Remaining pages: fetch in parallel batches
+    // Remaining pages: fetch in small parallel batches with inter-batch delay
     let currentPage = 2;
     let hasMore = true;
 
-    while (hasMore && currentPage <= maxPages) {
+    while (hasMore && currentPage <= FETCH_MAX_PAGES) {
       if (signal?.aborted) break;
 
-      const batchEnd = Math.min(currentPage + PARALLEL_BATCH - 1, maxPages);
+      const batchEnd = Math.min(currentPage + FETCH_PARALLEL_BATCH - 1, FETCH_MAX_PAGES);
       const pageNumbers = Array.from(
         { length: batchEnd - currentPage + 1 },
         (_, i) => currentPage + i
@@ -388,10 +422,15 @@ export async function fetchWalletTokenBalances(
       }
 
       currentPage = batchEnd + 1;
+
+      // Throttle between batches to avoid upstream rate limits
+      if (hasMore && currentPage <= FETCH_MAX_PAGES) {
+        await delay(FETCH_INTER_BATCH_DELAY_MS, signal);
+      }
     }
 
-    if (hasMore && currentPage > maxPages) {
-      console.warn(`Stopped wallet pagination at ${maxPages} pages for wallet ${walletAddress}`);
+    if (hasMore && currentPage > FETCH_MAX_PAGES) {
+      console.warn(`Stopped wallet pagination at ${FETCH_MAX_PAGES} pages for wallet ${walletAddress}`);
     }
 
     return Array.from(tokenMap.values());

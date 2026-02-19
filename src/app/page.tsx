@@ -7,6 +7,7 @@ import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles } from 'lucide
 import { VariableSizeList } from 'react-window'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
+import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import Navbar from '../components/Navbar'
 import {
@@ -488,7 +489,6 @@ export function Home({ active = true }: { active?: boolean }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [verificationFilter, setVerificationFilter] = useState<VerificationFilter>('all')
   const [sortBy, setSortBy] = useState<TokenSort>('verification')
-  const [hideNoRouteTokens, setHideNoRouteTokens] = useState(true)
   const [hideUnverifiedTokens, setHideUnverifiedTokens] = useState(false)
   const [tradabilityByMint, setTradabilityByMint] = useState<Record<string, TradabilityStatus>>({})
   const [usdQuoteStatusByMint, setUsdQuoteStatusByMint] = useState<Record<string, UsdQuoteStatus>>({})
@@ -953,7 +953,7 @@ export function Home({ active = true }: { active?: boolean }) {
           .filter(token => (
             isSellableToken(token)
             && !(tradabilityByMint[token.mint] === 'untradable' && tokenValueUsd(token) === null)
-            && (!hideNoRouteTokens || tradabilityByMint[token.mint] !== 'untradable')
+            && tradabilityByMint[token.mint] !== 'untradable'
             && (
               verificationFilter === 'unverified'
               || !hideUnverifiedTokens
@@ -965,7 +965,7 @@ export function Home({ active = true }: { active?: boolean }) {
       const nextSelected = new Set(Array.from(prevSelected).filter(mint => tokenMints.has(mint)))
       return nextSelected
     })
-  }, [tokens, hideNoRouteTokens, hideUnverifiedTokens, tradabilityByMint, verificationFilter])
+  }, [tokens, hideUnverifiedTokens, tradabilityByMint, verificationFilter])
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
 
@@ -996,7 +996,7 @@ export function Home({ active = true }: { active?: boolean }) {
         return false
       }
 
-      if (hideNoRouteTokens && tradabilityByMint[token.mint] === 'untradable') {
+      if (tradabilityByMint[token.mint] === 'untradable') {
         return false
       }
 
@@ -1026,7 +1026,7 @@ export function Home({ active = true }: { active?: boolean }) {
     })
 
     return sortTokens(filteredTokens, sortBy)
-  }, [tokens, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens, hideNoValueTokens, tradabilityByMint])
+  }, [tokens, searchQuery, verificationFilter, sortBy, hideUnverifiedTokens, hideNoValueTokens, tradabilityByMint])
 
   const visibleSellableTokens = useMemo(
     () => visibleTokens.filter(isSellableToken),
@@ -1058,11 +1058,6 @@ export function Home({ active = true }: { active?: boolean }) {
   useEffect(() => {
     tokenListVirtualizerRef.current?.resetAfterIndex(0)
   }, [visibleTokens.length, sellResults])
-
-  const noRouteTokenCount = useMemo(
-    () => sellableTokens.filter(token => tradabilityByMint[token.mint] === 'untradable').length,
-    [sellableTokens, tradabilityByMint]
-  )
 
   const noValueNoRouteTokenCount = useMemo(
     () => sellableTokens.filter(token => tradabilityByMint[token.mint] === 'untradable' && tokenValueUsd(token) === null).length,
@@ -2238,25 +2233,16 @@ export function Home({ active = true }: { active?: boolean }) {
 
                 <div className="flex items-center gap-1.5 bg-muted/50 h-7 px-2">
                   <span className="text-muted-foreground text-[10px] uppercase tracking-wider">filter</span>
-                  <select
+                  <Select
                     value={verificationFilter}
-                    onChange={(e) => setVerificationFilter(e.target.value as VerificationFilter)}
+                    onChange={(v) => setVerificationFilter(v as VerificationFilter)}
                     disabled={isSelling}
-                    className="bg-transparent text-xs font-mono text-foreground focus:outline-none disabled:opacity-40"
-                  >
-                    <option value="all">all</option>
-                    <option value="unverified">unverified</option>
-                  </select>
+                    options={[
+                      { value: 'all', label: 'all' },
+                      { value: 'unverified', label: 'unverified' },
+                    ]}
+                  />
                 </div>
-
-                <button
-                  type="button"
-                  onClick={() => setHideNoRouteTokens(prev => !prev)}
-                  disabled={isSelling}
-                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
-                >
-                  {hideNoRouteTokens ? 'show no-route' : 'hide no-route'}
-                </button>
 
                 <button
                   type="button"
@@ -2278,31 +2264,31 @@ export function Home({ active = true }: { active?: boolean }) {
 
                 <div className="flex items-center gap-1.5 bg-muted/50 h-7 px-2">
                   <span className="text-muted-foreground text-[10px] uppercase tracking-wider">sort</span>
-                  <select
+                  <Select
                     value={sortBy}
-                    onChange={(e) => setSortBy(e.target.value as TokenSort)}
+                    onChange={(v) => setSortBy(v as TokenSort)}
                     disabled={isSelling}
-                    className="bg-transparent text-xs font-mono text-foreground focus:outline-none disabled:opacity-40"
-                  >
-                    <option value="verification">verification</option>
-                    <option value="value">value</option>
-                    <option value="name">name</option>
-                  </select>
+                    options={[
+                      { value: 'verification', label: 'verification' },
+                      { value: 'value', label: 'value' },
+                      { value: 'name', label: 'name' },
+                    ]}
+                  />
                 </div>
 
                 <div className="flex items-center gap-1.5 bg-muted/50 h-7 px-2">
                   <span className="text-muted-foreground text-[10px] uppercase tracking-wider">slip</span>
-                  <select
+                  <Select
                     value={slippagePreset}
-                    onChange={(e) => setSlippagePreset(e.target.value as SlippagePreset)}
+                    onChange={(v) => setSlippagePreset(v as SlippagePreset)}
                     disabled={isSelling}
-                    className="bg-transparent text-xs font-mono text-foreground focus:outline-none disabled:opacity-40"
-                  >
-                    <option value="0.5">0.5%</option>
-                    <option value="1">1%</option>
-                    <option value="3">3%</option>
-                    <option value="custom">custom</option>
-                  </select>
+                    options={[
+                      { value: '0.5', label: '0.5%' },
+                      { value: '1', label: '1%' },
+                      { value: '3', label: '3%' },
+                      { value: 'custom', label: 'custom' },
+                    ]}
+                  />
                   {slippagePreset === 'custom' && (
                     <>
                       <input
@@ -2386,12 +2372,6 @@ export function Home({ active = true }: { active?: boolean }) {
                 {noValueNoRouteTokenCount > 0 && (
                   <span className="text-muted-foreground text-[11px] hidden sm:inline">
                     {noValueNoRouteTokenCount} junk hidden
-                  </span>
-                )}
-
-                {hideNoRouteTokens && noRouteTokenCount > 0 && (
-                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
-                    {noRouteTokenCount} no-route hidden
                   </span>
                 )}
 
@@ -2691,8 +2671,8 @@ export function Home({ active = true }: { active?: boolean }) {
               ) : (
                 <div className="py-20 flex flex-col items-center gap-3">
                   <span className="font-mono text-xs text-muted-foreground">
-                    {noValueNoRouteTokenCount > 0 || (hideNoRouteTokens && noRouteTokenCount > 0) || (hideUnverifiedTokens && unverifiedTokenCount > 0) || hideNoValueTokens
-                      ? 'No tokens match current filters. Try "show no-value", "show no-route", or "show unverified".'
+                    {noValueNoRouteTokenCount > 0 || (hideUnverifiedTokens && unverifiedTokenCount > 0) || hideNoValueTokens
+                      ? 'No tokens match current filters. Try "show no-value" or "show unverified".'
                       : 'No tokens match current search/filter settings.'}
                   </span>
                 </div>

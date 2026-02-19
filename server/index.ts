@@ -19,6 +19,11 @@ const MAX_PRIORITY_FEE_LAMPORTS_CAP = 2_000_000
 const ALLOWED_OUTPUT_MINTS = new Set([SOL_MINT, USDC_MINT])
 const QUOTE_CACHE_TTL_MS = 15_000
 const QUOTE_CACHE_MAX_ENTRIES = 500
+const HELIUS_CACHE_TTL_MS = 30_000
+const HELIUS_CACHE_MAX_ENTRIES = 200
+const HELIUS_MAX_CONCURRENT = 4
+const HELIUS_MAX_RETRIES = 3
+const HELIUS_RETRY_BASE_DELAY_MS = 300
 const REQUEST_TIMEOUT_MS = 15_000
 const RATE_LIMIT_WINDOW_MS = 60_000
 const RATE_LIMIT_MAX_REQUESTS = 240
@@ -38,6 +43,45 @@ const quoteCache = new Map<string, QuoteCacheEntry>()
 const inFlightQuoteRequests = new Map<string, Promise<JsonRecord>>()
 const rateLimitByIp = new Map<string, { count: number; resetAt: number; touchedAt: number }>()
 let lastRateLimitCleanupAt = 0
+
+interface HeliusCacheEntry {
+  payload: unknown
+  timestamp: number
+}
+
+const heliusCache = new Map<string, HeliusCacheEntry>()
+const inFlightHeliusRequests = new Map<string, Promise<{ ok: boolean; status: number; payload: unknown }>>()
+
+class Semaphore {
+  private current = 0
+  private readonly max: number
+  private readonly queue: Array<() => void> = []
+
+  constructor(max: number) {
+    this.max = max
+  }
+
+  acquire(): Promise<void> {
+    if (this.current < this.max) {
+      this.current++
+      return Promise.resolve()
+    }
+    return new Promise<void>(resolve => {
+      this.queue.push(() => {
+        this.current++
+        resolve()
+      })
+    })
+  }
+
+  release(): void {
+    this.current--
+    const next = this.queue.shift()
+    if (next) next()
+  }
+}
+
+const heliusSemaphore = new Semaphore(HELIUS_MAX_CONCURRENT)
 
 function getEnv(name: string): string | undefined {
   const value = process.env[name]
@@ -263,6 +307,69 @@ function pruneQuoteCache() {
   }
 }
 
+function pruneHeliusCache() {
+  const now = Date.now()
+
+  for (const [key, entry] of heliusCache.entries()) {
+    if (now - entry.timestamp >= HELIUS_CACHE_TTL_MS) {
+      heliusCache.delete(key)
+    }
+  }
+
+  if (heliusCache.size <= HELIUS_CACHE_MAX_ENTRIES) {
+    return
+  }
+
+  let oldestKey: string | null = null
+  let oldestTimestamp = Number.POSITIVE_INFINITY
+  for (const [key, entry] of heliusCache.entries()) {
+    if (entry.timestamp < oldestTimestamp) {
+      oldestTimestamp = entry.timestamp
+      oldestKey = key
+    }
+  }
+  if (oldestKey) {
+    heliusCache.delete(oldestKey)
+  }
+}
+
+async function fetchHeliusWithRetry(
+  url: string,
+  headers: Record<string, string>
+): Promise<{ ok: boolean; status: number; payload: unknown }> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt <= HELIUS_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = HELIUS_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1)
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+
+    await heliusSemaphore.acquire()
+    try {
+      const { response, payload } = await fetchJsonWithTimeout(url, {
+        method: 'GET',
+        headers,
+      })
+
+      if (response.status === 429 || response.status >= 500) {
+        lastError = new Error(`Helius API returned ${response.status}`)
+        if (attempt < HELIUS_MAX_RETRIES) continue
+        return { ok: false, status: response.status, payload }
+      }
+
+      return { ok: response.ok, status: response.status, payload }
+    } catch (err) {
+      lastError = err
+      if (attempt >= HELIUS_MAX_RETRIES) throw err
+    } finally {
+      heliusSemaphore.release()
+    }
+  }
+
+  throw lastError
+}
+
 const quoteQuerySchema = z.object({
   inputMint: z.string().refine(isValidPublicKey, 'Invalid inputMint'),
   outputMint: z.string().refine(isValidPublicKey, 'Invalid outputMint'),
@@ -364,7 +471,33 @@ app.get('/api/wallet/:walletAddress/balances', async (request: Request, response
 
   const page = parsePositiveInt(request.query.page, 1, 1, 50)
   const limit = parsePositiveInt(request.query.limit, 100, 1, 100)
+  const cacheKey = `${walletAddress}:${page}:${limit}`
 
+  // 1. Serve from cache if fresh
+  const cached = heliusCache.get(cacheKey)
+  if (cached && Date.now() - cached.timestamp < HELIUS_CACHE_TTL_MS) {
+    response.json(cached.payload)
+    return
+  }
+
+  // 2. Coalesce in-flight requests for the same wallet+page
+  const inFlight = inFlightHeliusRequests.get(cacheKey)
+  if (inFlight) {
+    try {
+      const result = await inFlight
+      if (result.ok) {
+        response.json(result.payload)
+      } else {
+        const error = normalizeErrorMessage(result.payload, `Wallet API returned ${result.status}`)
+        response.status(502).json({ error })
+      }
+    } catch {
+      response.status(502).json({ error: 'Wallet API request failed.' })
+    }
+    return
+  }
+
+  // 3. Fetch from Helius with concurrency control + retry
   const params = new URLSearchParams({
     'api-key': heliusApiKey,
     page: String(page),
@@ -374,27 +507,38 @@ app.get('/api/wallet/:walletAddress/balances', async (request: Request, response
     showZeroBalance: 'false',
   })
 
-  try {
-    const { response: upstreamResponse, payload } = await fetchJsonWithTimeout(
-      `${heliusBaseUrl}/v1/wallet/${encodeURIComponent(walletAddress)}/balances?${params.toString()}`,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-          'x-api-key': heliusApiKey,
-        },
-      }
-    )
+  const url = `${heliusBaseUrl}/v1/wallet/${encodeURIComponent(walletAddress)}/balances?${params.toString()}`
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'x-api-key': heliusApiKey,
+  }
 
-    if (!upstreamResponse.ok) {
-      const error = normalizeErrorMessage(payload, `Wallet API returned ${upstreamResponse.status}`)
-      response.status(502).json({ error })
+  const requestPromise = fetchHeliusWithRetry(url, headers)
+  inFlightHeliusRequests.set(cacheKey, requestPromise)
+
+  try {
+    const result = await requestPromise
+
+    if (!result.ok) {
+      const error = normalizeErrorMessage(result.payload, `Wallet API returned ${result.status}`)
+      if (result.status === 429) {
+        response.setHeader('Retry-After', '5')
+        response.status(429).json({ error: 'Upstream rate limit reached. Please retry shortly.' })
+      } else {
+        response.status(502).json({ error })
+      }
       return
     }
 
-    response.json(payload)
+    // Cache the successful response
+    heliusCache.set(cacheKey, { payload: result.payload, timestamp: Date.now() })
+    pruneHeliusCache()
+
+    response.json(result.payload)
   } catch {
     response.status(502).json({ error: 'Wallet API request failed.' })
+  } finally {
+    inFlightHeliusRequests.delete(cacheKey)
   }
 })
 
