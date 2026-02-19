@@ -276,7 +276,7 @@ const swapBodySchema = z.object({
   quoteResponse: z.object({
     inputMint: z.string().refine(isValidPublicKey, 'Invalid quoteResponse.inputMint'),
     outputMint: z.string().refine(isValidPublicKey, 'Invalid quoteResponse.outputMint'),
-    amount: z.string().regex(/^\d+$/, 'Invalid quoteResponse.amount').max(MAX_RAW_AMOUNT_DIGITS, 'quoteResponse.amount is too large').refine(value => BigInt(value) > BigInt(0), 'quoteResponse.amount must be > 0'),
+    inAmount: z.string().regex(/^\d+$/, 'Invalid quoteResponse.inAmount').max(MAX_RAW_AMOUNT_DIGITS, 'quoteResponse.inAmount is too large').refine(value => BigInt(value) > BigInt(0), 'quoteResponse.inAmount must be > 0'),
   }).passthrough(),
 })
 

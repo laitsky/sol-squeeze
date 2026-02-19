@@ -51,17 +51,15 @@ export default function App() {
     }
   }, [])
 
-  let page = <NotFoundPage />
-
-  if (pathname === '/') {
-    page = <Home />
-  } else if (pathname === '/how-it-works') {
-    page = <HowItWorksPage />
-  }
+  const isHome = pathname === '/'
+  const isHowItWorks = pathname === '/how-it-works'
+  const isNotFound = !isHome && !isHowItWorks
 
   return (
     <Providers>
-      {page}
+      <Home active={isHome} />
+      {isHowItWorks && <HowItWorksPage />}
+      {isNotFound && <NotFoundPage />}
     </Providers>
   )
 }

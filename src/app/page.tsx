@@ -135,9 +135,6 @@ const DEFAULT_DUST_THRESHOLD_USD = 5
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 const TRADEABILITY_PROBE_BATCH_SIZE = 30
 const TRADEABILITY_PROBE_CONCURRENCY = 6
-const LAZY_PROBE_INITIAL_LIMIT = 60
-const LAZY_PROBE_STEP = 40
-const LAZY_PROBE_SCROLL_OFFSET_PX = 900
 const TOKEN_ROW_HEIGHT_PX = 124
 const TOKEN_ROW_EXECUTION_HEIGHT_PX = 48
 const TOKEN_VIRTUALIZATION_THRESHOLD = 80
@@ -445,13 +442,13 @@ function sortTokens(tokens: Token[], sortBy: TokenSort): Token[] {
 
     const aValue = tokenValueUsd(a)
     const bValue = tokenValueUsd(b)
+
     if (aValue !== null && bValue !== null) {
       return bValue - aValue
     }
-
-    const aName = (a.metadata?.symbol || a.metadata?.name || a.mint).toLowerCase()
-    const bName = (b.metadata?.symbol || b.metadata?.name || b.mint).toLowerCase()
-    return aName.localeCompare(bName)
+    if (aValue !== null) return -1
+    if (bValue !== null) return 1
+    return (b.amount || 0) - (a.amount || 0)
   })
 }
 
@@ -465,7 +462,7 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
   return chunks
 }
 
-export function Home() {
+export function Home({ active = true }: { active?: boolean }) {
   const { publicKey, connected, sendTransaction, signAllTransactions, wallet } = useWallet()
   const { setVisible: setWalletModalVisible } = useWalletModal()
 
@@ -492,10 +489,10 @@ export function Home() {
   const [verificationFilter, setVerificationFilter] = useState<VerificationFilter>('all')
   const [sortBy, setSortBy] = useState<TokenSort>('verification')
   const [hideNoRouteTokens, setHideNoRouteTokens] = useState(true)
-  const [hideUnverifiedTokens, setHideUnverifiedTokens] = useState(true)
+  const [hideUnverifiedTokens, setHideUnverifiedTokens] = useState(false)
   const [tradabilityByMint, setTradabilityByMint] = useState<Record<string, TradabilityStatus>>({})
   const [usdQuoteStatusByMint, setUsdQuoteStatusByMint] = useState<Record<string, UsdQuoteStatus>>({})
-  const [tokenProbeLimit, setTokenProbeLimit] = useState(LAZY_PROBE_INITIAL_LIMIT)
+  const [hideNoValueTokens, setHideNoValueTokens] = useState(true)
 
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [recentActivity, setRecentActivity] = useState<RecentActivityItem[]>([])
@@ -705,7 +702,6 @@ export function Home() {
       setCurrentRunMints(new Set())
       setTradabilityByMint({})
       setUsdQuoteStatusByMint({})
-      setTokenProbeLimit(LAZY_PROBE_INITIAL_LIMIT)
     }
   }, [connected, publicKey])
 
@@ -739,28 +735,7 @@ export function Home() {
     })
   }, [tokens])
 
-  useEffect(() => {
-    setTokenProbeLimit(LAZY_PROBE_INITIAL_LIMIT)
-  }, [connected, publicKey, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens])
 
-  useEffect(() => {
-    if (!connected) {
-      return
-    }
-
-    const onScroll = () => {
-      const nearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - LAZY_PROBE_SCROLL_OFFSET_PX
-      if (!nearBottom) return
-      setTokenProbeLimit(prev => Math.min(prev + LAZY_PROBE_STEP, tokens.length))
-    }
-
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-
-    return () => {
-      window.removeEventListener('scroll', onScroll)
-    }
-  }, [connected, tokens.length, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens])
 
   useEffect(() => {
     tradabilityProbeControllerRef.current?.abort()
@@ -791,27 +766,7 @@ export function Home() {
       return
     }
 
-    const tradabilitySnapshot = tradabilityByMintRef.current
-    const normalizedQuery = searchQuery.trim().toLowerCase()
-    const visibleProbeTokens = sortTokens(tokens.filter(token => {
-      const verificationLevel = getVerificationLevel(token.metadata || null)
-      const hasNoValueAndNoRoute = tradabilitySnapshot[token.mint] === 'untradable' && tokenValueUsd(token) === null
-
-      if (hasNoValueAndNoRoute) return false
-      if (hideNoRouteTokens && tradabilitySnapshot[token.mint] === 'untradable') return false
-      if (verificationFilter === 'unverified' && verificationLevel !== 'unverified') return false
-      if (verificationFilter !== 'unverified' && hideUnverifiedTokens && verificationLevel === 'unverified') return false
-
-      if (!normalizedQuery) return true
-      const searchParts = [
-        token.metadata?.name || '',
-        token.metadata?.symbol || '',
-        token.mint,
-      ]
-      return searchParts.some(part => part.toLowerCase().includes(normalizedQuery))
-    }), sortBy)
-
-    const probeTargets = visibleProbeTokens.filter(isSellableToken).slice(0, tokenProbeLimit)
+    const probeTargets = tokens.filter(isSellableToken)
     const probeCandidates = probeTargets.filter(token => {
       const tradabilityStatus = tradabilityByMintRef.current[token.mint]
       const usdQuoteStatus = usdQuoteStatusByMintRef.current[token.mint]
@@ -988,13 +943,7 @@ export function Home() {
     publicKey,
     isSelling,
     probeTokensSignature,
-    tokenProbeLimit,
     effectiveSlippageBps,
-    searchQuery,
-    verificationFilter,
-    sortBy,
-    hideNoRouteTokens,
-    hideUnverifiedTokens,
   ])
 
   useEffect(() => {
@@ -1020,6 +969,22 @@ export function Home() {
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
 
+  const valuesResolvedCount = useMemo(() => {
+    return sellableTokens.filter(token => {
+      const tradStatus = tradabilityByMint[token.mint]
+      const usdStatus = usdQuoteStatusByMint[token.mint]
+      const tradResolved = tradStatus === 'tradable' || tradStatus === 'untradable' || tradStatus === 'error'
+      const usdResolved = hasValidTokenPrice(token) || usdStatus === 'priced' || usdStatus === 'unavailable' || usdStatus === 'error'
+      return tradResolved && usdResolved
+    }).length
+  }, [sellableTokens, tradabilityByMint, usdQuoteStatusByMint])
+
+  const allValuesResolved = useMemo(() => {
+    if (loading || loadingMore) return false
+    if (sellableTokens.length === 0) return tokens.length > 0
+    return valuesResolvedCount === sellableTokens.length
+  }, [loading, loadingMore, tokens, sellableTokens, valuesResolvedCount])
+
   const visibleTokens = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase()
 
@@ -1043,6 +1008,10 @@ export function Home() {
         return false
       }
 
+      if (hideNoValueTokens && tokenValueUsd(token) === null) {
+        return false
+      }
+
       if (!normalizedQuery) {
         return true
       }
@@ -1057,7 +1026,7 @@ export function Home() {
     })
 
     return sortTokens(filteredTokens, sortBy)
-  }, [tokens, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens, tradabilityByMint])
+  }, [tokens, searchQuery, verificationFilter, sortBy, hideNoRouteTokens, hideUnverifiedTokens, hideNoValueTokens, tradabilityByMint])
 
   const visibleSellableTokens = useMemo(
     () => visibleTokens.filter(isSellableToken),
@@ -2099,7 +2068,7 @@ export function Home() {
   }
 
   return (
-    <>
+    <div hidden={!active}>
       <Navbar />
 
       <div className="fixed right-4 top-14 z-[120] flex w-[min(92vw,420px)] flex-col gap-2">
@@ -2207,7 +2176,7 @@ export function Home() {
                     Tokens
                   </div>
                   <div className="text-lg tabular-nums leading-none">
-                    {loading ? (
+                    {loading || !allValuesResolved ? (
                       <span className="inline-block w-8 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
                     ) : tokens.length}
                   </div>
@@ -2217,7 +2186,7 @@ export function Home() {
                     Sellable
                   </div>
                   <div className="text-lg tabular-nums leading-none">
-                    {loading ? (
+                    {loading || !allValuesResolved ? (
                       <span className="inline-block w-8 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
                     ) : sellableTokens.length}
                   </div>
@@ -2227,7 +2196,7 @@ export function Home() {
                     Portfolio
                   </div>
                   <div className="text-lg tabular-nums leading-none">
-                    {loading ? (
+                    {loading || !allValuesResolved ? (
                       <span className="inline-block w-16 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
                     ) : totalPortfolioValue > 0 ? formatPrice(totalPortfolioValue) : '$0.00'}
                   </div>
@@ -2253,7 +2222,7 @@ export function Home() {
               </div>
             </div>
 
-            {!loading && tokens.length > 0 && (
+            {!loading && allValuesResolved && tokens.length > 0 && (
               <div className="py-4 border-b border-border flex flex-wrap items-center gap-2.5 font-mono text-xs">
                 <div className="flex items-center gap-1.5 bg-muted/50 h-7 px-2 min-w-[190px]">
                   <span className="text-muted-foreground text-[10px] uppercase tracking-wider">search</span>
@@ -2296,6 +2265,15 @@ export function Home() {
                   className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
                 >
                   {hideUnverifiedTokens ? 'show unverified' : 'hide unverified'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setHideNoValueTokens(prev => !prev)}
+                  disabled={isSelling}
+                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
+                >
+                  {hideNoValueTokens ? 'show no-value' : 'hide no-value'}
                 </button>
 
                 <div className="flex items-center gap-1.5 bg-muted/50 h-7 px-2">
@@ -2672,7 +2650,16 @@ export function Home() {
             {loading ? (
               <div className="py-24 flex flex-col items-center gap-4">
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                <span className="font-mono text-xs text-muted-foreground">Scanning wallet...</span>
+                <span className="font-mono text-xs text-muted-foreground">
+                  Scanning wallet{tokens.length > 0 ? `... ${tokens.length} token${tokens.length === 1 ? '' : 's'} found` : '...'}
+                </span>
+              </div>
+            ) : !allValuesResolved && tokens.length > 0 ? (
+              <div className="py-24 flex flex-col items-center gap-4">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <span className="font-mono text-xs text-muted-foreground">
+                  Fetching token values... {valuesResolvedCount}/{sellableTokens.length}
+                </span>
               </div>
             ) : tokens.length > 0 ? (
               visibleTokens.length > 0 ? (
@@ -2694,12 +2681,6 @@ export function Home() {
                       itemSize={getVirtualizedTokenRowHeight}
                       overscanCount={TOKEN_VIRTUAL_OVERSCAN}
                       itemKey={(index) => visibleTokens[index]?.mint ?? index}
-                      onScroll={({ scrollOffset, scrollUpdateWasRequested }) => {
-                        if (scrollUpdateWasRequested) return
-                        const nearBottom = scrollOffset + virtualizedTokenListHeight >= virtualizedTokenContentHeight - LAZY_PROBE_SCROLL_OFFSET_PX
-                        if (!nearBottom) return
-                        setTokenProbeLimit(prev => Math.min(prev + LAZY_PROBE_STEP, tokens.length))
-                      }}
                     >
                       {({ index, style }) => renderTokenRow(visibleTokens[index], index, style)}
                     </VariableSizeList>
@@ -2710,8 +2691,8 @@ export function Home() {
               ) : (
                 <div className="py-20 flex flex-col items-center gap-3">
                   <span className="font-mono text-xs text-muted-foreground">
-                    {noValueNoRouteTokenCount > 0 || (hideNoRouteTokens && noRouteTokenCount > 0) || (hideUnverifiedTokens && unverifiedTokenCount > 0)
-                      ? 'No tokens match current filters. Try "show no-route" or "show unverified".'
+                    {noValueNoRouteTokenCount > 0 || (hideNoRouteTokens && noRouteTokenCount > 0) || (hideUnverifiedTokens && unverifiedTokenCount > 0) || hideNoValueTokens
+                      ? 'No tokens match current filters. Try "show no-value", "show no-route", or "show unverified".'
                       : 'No tokens match current search/filter settings.'}
                   </span>
                 </div>
@@ -2724,12 +2705,6 @@ export function Home() {
               </div>
             )}
 
-            {loadingMore && (
-              <div className="py-4 flex items-center justify-center gap-2 font-mono text-xs text-muted-foreground">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                <span>Loading more tokens...</span>
-              </div>
-            )}
 
             <div className="h-24" />
           </div>
@@ -2765,6 +2740,6 @@ export function Home() {
           </div>
         )}
       </main>
-    </>
+    </div>
   )
 }
