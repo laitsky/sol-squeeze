@@ -13,8 +13,8 @@ export function HowItWorksPage() {
               works
             </h1>
             <p className="font-mono text-sm text-muted-foreground leading-relaxed mb-10 max-w-[620px]">
-              Built for security-paranoid wallets: route through trusted liquidity, keep signing in your own wallet,
-              and stay in full control from quote to confirmation.
+              Swaps route through trusted liquidity, every transaction is signed in your wallet, and you stay in
+              control from quote to final confirmation.
             </p>
 
             <section className="border border-border/60 bg-muted/20 p-6 mb-6">
@@ -26,7 +26,7 @@ export function HowItWorksPage() {
                 </p>
                 <p>
                   Sol Squeeze is non-custodial: your wallet signs each transaction, and funds never leave your control
-                  except for the swaps you explicitly approve.
+                  except for swaps and post-swap account closes that you explicitly approve.
                 </p>
               </div>
             </section>
@@ -35,9 +35,10 @@ export function HowItWorksPage() {
               <h2 className="font-mono text-xs uppercase tracking-[0.18em] text-foreground/80 mb-4">Flow</h2>
               <div className="space-y-3 font-mono text-xs text-muted-foreground leading-relaxed">
                 <p>1. Connect wallet and scan SPL balances.</p>
-                <p>2. Choose which low-value tokens to sell.</p>
-                <p>3. Review quotes and approve transactions in your wallet.</p>
-                <p>4. Receive SOL directly back to the same wallet.</p>
+                <p>2. Choose which low-value tokens to sell and burn.</p>
+                <p>3. Approve each swap in your wallet.</p>
+                <p>4. After each successful swap, Sol Squeeze closes emptied token accounts to reclaim rent.</p>
+                <p>5. Receive reclaimed SOL directly back to the same wallet.</p>
               </div>
             </section>
           </div>

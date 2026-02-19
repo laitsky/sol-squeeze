@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { Connection, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js'
-import { createBurnCheckedInstruction, createCloseAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token'
+import { createCloseAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token'
 import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles } from 'lucide-react'
 import { VariableSizeList } from 'react-window'
 import { Badge } from '@/components/ui/badge'
@@ -338,7 +338,7 @@ function parseRecentActivityItem(value: unknown, index: number): RecentActivityI
   }
 }
 
-async function findCleanupTokenAccount(
+async function findEmptyTokenAccountForClose(
   connection: Connection,
   owner: PublicKey,
   mint: PublicKey
@@ -358,7 +358,6 @@ async function findCleanupTokenAccount(
           info?: {
             tokenAmount?: {
               amount?: unknown
-              decimals?: unknown
             }
           }
         }
@@ -366,20 +365,19 @@ async function findCleanupTokenAccount(
     ).parsed?.info
 
     const amountRaw = parseUnsignedBigInt(info?.tokenAmount?.amount)
-    if (amountRaw === null || amountRaw <= BigInt(0)) {
+    if (amountRaw === null || amountRaw !== BigInt(0)) {
       continue
     }
 
-    const decimals = typeof info?.tokenAmount?.decimals === 'number' ? info.tokenAmount.decimals : 0
     const candidate: CleanupTokenAccount = {
       address: tokenAccount.pubkey,
       amountRaw,
-      decimals,
+      decimals: 0,
       lamports: BigInt(tokenAccount.account.lamports),
       programId: tokenAccount.account.owner || TOKEN_PROGRAM_ID,
     }
 
-    if (!selected || candidate.amountRaw > selected.amountRaw) {
+    if (!selected || candidate.lamports > selected.lamports) {
       selected = candidate
     }
   }
@@ -473,7 +471,6 @@ export function Home({ active = true }: { active?: boolean }) {
   const [selectedMints, setSelectedMints] = useState<Set<string>>(new Set())
   const [isSelling, setIsSelling] = useState(false)
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false)
-  const [allowNoRouteCleanup, setAllowNoRouteCleanup] = useState(false)
   const [sellResults, setSellResults] = useState<Record<string, ExecutionResult>>({})
   const [sellSummary, setSellSummary] = useState<SellSummary | null>(null)
   const [globalError, setGlobalError] = useState<string | null>(null)
@@ -1408,29 +1405,13 @@ export function Home({ active = true }: { active?: boolean }) {
     }
   }
 
-  async function executeNoLiquidityCleanup(
+  async function executePostSwapAccountClose(
     connection: Connection,
     ownerAddress: string,
-    token: Token
-  ): Promise<{ signature: string; reclaimedLamports: bigint }> {
+    tokenAccount: CleanupTokenAccount
+  ): Promise<string> {
     const ownerPublicKey = new PublicKey(ownerAddress)
-    const mintPublicKey = new PublicKey(token.mint)
-    const tokenAccount = await findCleanupTokenAccount(connection, ownerPublicKey, mintPublicKey)
-
-    if (!tokenAccount) {
-      throw new Error('Token account with a positive balance was not found.')
-    }
-
     const transaction = new Transaction().add(
-      createBurnCheckedInstruction(
-        tokenAccount.address,
-        mintPublicKey,
-        ownerPublicKey,
-        tokenAccount.amountRaw,
-        tokenAccount.decimals,
-        [],
-        tokenAccount.programId
-      ),
       createCloseAccountInstruction(
         tokenAccount.address,
         ownerPublicKey,
@@ -1440,21 +1421,16 @@ export function Home({ active = true }: { active?: boolean }) {
       )
     )
 
-    const signature = await sendTransaction(transaction, connection, {
+    return sendTransaction(transaction, connection, {
       skipPreflight: false,
       maxRetries: 3,
       preflightCommitment: 'confirmed',
     })
-
-    return {
-      signature,
-      reclaimedLamports: tokenAccount.lamports,
-    }
   }
 
   async function executeSellRun(
     targetTokens: Token[],
-    options: { resetResults: boolean; resetSummary: boolean; allowNoRouteCleanup: boolean }
+    options: { resetResults: boolean; resetSummary: boolean }
   ) {
     if (!connected || !publicKey || isSelling) {
       return
@@ -1480,7 +1456,7 @@ export function Home({ active = true }: { active?: boolean }) {
     let failed = 0
     let skipped = 0
     let confirmedSwaps = 0
-    let confirmedCleanups = 0
+    let confirmedPostSwapClosures = 0
     let swapOutLamportsEstimate = BigInt(0)
     let cleanupLamportsRecovered = BigInt(0)
     let disconnectionHandled = false
@@ -1504,52 +1480,58 @@ export function Home({ active = true }: { active?: boolean }) {
       pushToast('error', `Wallet disconnected during batch on ${wallet?.adapter.name || 'wallet'}.`)
     }
 
-    const handleNoRouteFallback = async (token: Token): Promise<void> => {
-      updateSellResult(token.mint, {
-        state: 'building',
-        message: 'No route found. Burning and closing token account...',
-      })
+    const finalizeConfirmedSwap = async (preparedSwap: PreparedSwap, signature: string) => {
+      succeeded += 1
+      confirmedSwaps += 1
+      swapOutLamportsEstimate += preparedSwap.outLamportsEstimate
+      soldMints.add(preparedSwap.token.mint)
+
+      let finalMessage = 'Done.'
 
       try {
-        const { signature, reclaimedLamports } = await executeNoLiquidityCleanup(connection, ownerAddress, token)
+        const ownerPublicKey = new PublicKey(ownerAddress)
+        const mintPublicKey = new PublicKey(preparedSwap.token.mint)
+        const emptyTokenAccount = await findEmptyTokenAccountForClose(connection, ownerPublicKey, mintPublicKey)
 
-        updateSellResult(token.mint, {
-          state: 'submitted',
-          signature,
-          message: 'Confirming burn + close...',
-        })
+        if (emptyTokenAccount) {
+          updateSellResult(preparedSwap.token.mint, {
+            state: 'awaiting-signature',
+            signature,
+            message: 'Swap confirmed. Sign to close empty token account.',
+          })
 
-        const confirmation = await connection.confirmTransaction(signature, 'confirmed')
-        if (confirmation.value.err) {
-          throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
+          const closeSignature = await executePostSwapAccountClose(connection, ownerAddress, emptyTokenAccount)
+          updateSellResult(preparedSwap.token.mint, {
+            state: 'submitted',
+            signature: closeSignature,
+            message: 'Confirming token account close...',
+          })
+
+          const closeConfirmation = await connection.confirmTransaction(closeSignature, 'confirmed')
+          if (closeConfirmation.value.err) {
+            throw new Error(`On-chain error: ${JSON.stringify(closeConfirmation.value.err)}`)
+          }
+
+          confirmedPostSwapClosures += 1
+          cleanupLamportsRecovered += emptyTokenAccount.lamports
+          finalMessage = 'Done. Closed empty token account.'
         }
-
-        succeeded += 1
-        confirmedCleanups += 1
-        cleanupLamportsRecovered += reclaimedLamports
-        soldMints.add(token.mint)
-        updateSellResult(token.mint, {
-          state: 'confirmed',
-          signature,
-          message: 'Burned + closed (no liquidity route).',
-        })
-        addRecentActivity({
-          signature,
-          mint: token.mint,
-          tokenLabel: tokenLabel(token),
-          tokenAmount: token.amount,
-        })
-      } catch (cleanupError) {
-        failed += 1
-        const message = `No route for ${tokenLabel(token)}. Burn+close fallback failed: ${errorMessage(cleanupError)}`
-        updateSellResult(token.mint, { state: 'failed', message })
-        pushToast('error', message, {
-          label: 'Retry',
-          onClick: () => {
-            void retryToken(token.mint)
-          },
-        })
+      } catch (closeError) {
+        finalMessage = 'Done. Swap confirmed (account close failed).'
+        pushToast('error', `Swap confirmed for ${tokenLabel(preparedSwap.token)}, but account close failed: ${errorMessage(closeError)}`)
       }
+
+      updateSellResult(preparedSwap.token.mint, {
+        state: 'confirmed',
+        signature,
+        message: finalMessage,
+      })
+      addRecentActivity({
+        signature,
+        mint: preparedSwap.token.mint,
+        tokenLabel: tokenLabel(preparedSwap.token),
+        tokenAmount: preparedSwap.token.amount,
+      })
     }
 
     setIsSelling(true)
@@ -1605,28 +1587,19 @@ export function Home({ active = true }: { active?: boolean }) {
               slippageBps: effectiveSlippageBps,
             })
           } catch (error) {
-            if (options.allowNoRouteCleanup && hasNoRouteError(errorMessage(error))) {
-              await handleNoRouteFallback(token)
-              continue
-            }
-
-            if (hasNoRouteError(errorMessage(error))) {
-              const message = `No route found for ${tokenLabel(token)}. Enable burn+close fallback to reclaim rent for untradable tokens.`
-              failed += 1
-              updateSellResult(token.mint, { state: 'failed', message })
-              pushToast('error', message)
-              continue
-            }
-
             const message = quoteFailureMessage(token, error)
             failed += 1
             updateSellResult(token.mint, { state: 'failed', message })
-            pushToast('error', message, {
-              label: 'Retry',
-              onClick: () => {
-                void retryToken(token.mint)
-              },
-            })
+            if (hasNoRouteError(errorMessage(error))) {
+              pushToast('error', message)
+            } else {
+              pushToast('error', message, {
+                label: 'Retry',
+                onClick: () => {
+                  void retryToken(token.mint)
+                },
+              })
+            }
             continue
           }
 
@@ -1644,13 +1617,8 @@ export function Home({ active = true }: { active?: boolean }) {
               outLamportsEstimate: outAmountRaw ? BigInt(outAmountRaw) : BigInt(0),
             })
           } catch (error) {
-            if (options.allowNoRouteCleanup && hasNoRouteError(errorMessage(error))) {
-              await handleNoRouteFallback(token)
-              continue
-            }
-
             if (hasNoRouteError(errorMessage(error))) {
-              const message = `No route found for ${tokenLabel(token)}. Enable burn+close fallback to reclaim rent for untradable tokens.`
+              const message = `No route found for ${tokenLabel(token)} - low liquidity.`
               failed += 1
               updateSellResult(token.mint, { state: 'failed', message })
               pushToast('error', message)
@@ -1750,21 +1718,7 @@ export function Home({ active = true }: { active?: boolean }) {
                   throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
                 }
 
-                succeeded += 1
-                confirmedSwaps += 1
-                swapOutLamportsEstimate += preparedSwap.outLamportsEstimate
-                soldMints.add(preparedSwap.token.mint)
-                updateSellResult(preparedSwap.token.mint, {
-                  state: 'confirmed',
-                  signature,
-                  message: 'Done.',
-                })
-                addRecentActivity({
-                  signature,
-                  mint: preparedSwap.token.mint,
-                  tokenLabel: tokenLabel(preparedSwap.token),
-                  tokenAmount: preparedSwap.token.amount,
-                })
+                await finalizeConfirmedSwap(preparedSwap, signature)
               } catch (error) {
                 failed += 1
                 const message = swapFailureMessage(preparedSwap.token, error)
@@ -1812,17 +1766,7 @@ export function Home({ active = true }: { active?: boolean }) {
                 throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
               }
 
-              succeeded += 1
-              confirmedSwaps += 1
-              swapOutLamportsEstimate += preparedSwap.outLamportsEstimate
-              soldMints.add(preparedSwap.token.mint)
-              updateSellResult(preparedSwap.token.mint, { state: 'confirmed', signature, message: 'Done.' })
-              addRecentActivity({
-                signature,
-                mint: preparedSwap.token.mint,
-                tokenLabel: tokenLabel(preparedSwap.token),
-                tokenAmount: preparedSwap.token.amount,
-              })
+              await finalizeConfirmedSwap(preparedSwap, signature)
             } catch (error) {
               failed += 1
               const message = swapFailureMessage(preparedSwap.token, error)
@@ -1842,8 +1786,11 @@ export function Home({ active = true }: { active?: boolean }) {
         setSellSummary({ sold: succeeded, failed, skipped })
       }
 
+      const postSwapCloseSummary = confirmedPostSwapClosures > 0
+        ? `, ${confirmedPostSwapClosures} post-swap account close${confirmedPostSwapClosures > 1 ? 's' : ''}`
+        : ''
       appendBatchProgressEvent(
-        `Finished: ${succeeded} confirmed (${confirmedSwaps} swaps, ${confirmedCleanups} burn+close), ${failed} failed, ${skipped} skipped.`
+        `Finished: ${succeeded} confirmed (${confirmedSwaps} swaps${postSwapCloseSummary}), ${failed} failed, ${skipped} skipped.`
       )
 
       if (succeeded > 0) {
@@ -1854,13 +1801,10 @@ export function Home({ active = true }: { active?: boolean }) {
           reclaimedLamportsEstimate,
         })
         setShareCaptionCopied(false)
-        if (confirmedSwaps > 0 && confirmedCleanups > 0) {
-          pushToast('success', `Confirmed ${succeeded} actions (${confirmedSwaps} swaps, ${confirmedCleanups} burn+close).`)
-        } else if (confirmedCleanups > 0) {
-          pushToast('success', `Confirmed ${confirmedCleanups} burn+close cleanup${confirmedCleanups > 1 ? 's' : ''}.`)
-        } else {
-          pushToast('success', `Confirmed ${confirmedSwaps} swap${confirmedSwaps > 1 ? 's' : ''}.`)
-        }
+        const closeSuffix = confirmedPostSwapClosures > 0
+          ? ` Closed ${confirmedPostSwapClosures} empty token account${confirmedPostSwapClosures > 1 ? 's' : ''} to reclaim rent.`
+          : ''
+        pushToast('success', `Confirmed ${confirmedSwaps} swap${confirmedSwaps > 1 ? 's' : ''}.${closeSuffix}`)
       }
 
       if (soldMints.size > 0) {
@@ -1884,7 +1828,6 @@ export function Home({ active = true }: { active?: boolean }) {
       return
     }
 
-    setAllowNoRouteCleanup(false)
     setIsConfirmModalOpen(true)
   }
 
@@ -1893,7 +1836,6 @@ export function Home({ active = true }: { active?: boolean }) {
     await executeSellRun(selectedTokensForSell, {
       resetResults: true,
       resetSummary: true,
-      allowNoRouteCleanup,
     })
   }
 
@@ -1913,7 +1855,6 @@ export function Home({ active = true }: { active?: boolean }) {
     await executeSellRun([token], {
       resetResults: false,
       resetSummary: false,
-      allowNoRouteCleanup: false,
     })
   }
 
@@ -2120,28 +2061,17 @@ export function Home({ active = true }: { active?: boolean }) {
           onClick={() => setIsConfirmModalOpen(false)}
         >
           <div className="w-full max-w-md border border-border bg-background p-4 font-mono" onClick={(e) => e.stopPropagation()}>
-            <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">Confirm sell</div>
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">Confirm sell and burn</div>
             <div className="text-sm leading-relaxed text-foreground">
               You&apos;re selling {selectedSellableCount} token{selectedSellableCount > 1 ? 's' : ''} for
               {' '}~{formatSolEstimate(sellEstimate.totalOutLamports)} SOL.
+              {' '}Any emptied token accounts are closed automatically to reclaim rent.
               {' '}Priority fees: ~{estimatedFeeLamports ? formatLamportsAsSol(estimatedFeeLamports, 6) : '--'} SOL.
               {' '}Proceed?
             </div>
             <div className="mt-4 text-[11px] text-muted-foreground">
               Slippage: {formatSlippageBps(effectiveSlippageBps)}. Quotes: {quoteAgeLabel}.
             </div>
-            <label className="mt-3 flex items-start gap-2 text-[11px] text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={allowNoRouteCleanup}
-                onChange={(event) => setAllowNoRouteCleanup(event.target.checked)}
-                className="mt-0.5"
-                disabled={isSelling}
-              />
-              <span>
-                Enable burn+close fallback for no-route tokens (irreversible).
-              </span>
-            </label>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
                 type="button"
@@ -2434,7 +2364,7 @@ export function Home({ active = true }: { active?: boolean }) {
                   ) : (
                     <ArrowRight className="h-3 w-3" />
                   )}
-                  sell{selectedSellableCount > 0 ? ` ${selectedSellableCount}` : ''}
+                  sell and burn{selectedSellableCount > 0 ? ` ${selectedSellableCount}` : ''}
                 </button>
               </div>
             )}
