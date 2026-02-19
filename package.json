@@ -4,10 +4,17 @@
   "private": true,
   "packageManager": "bun@1.3.7",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "vite",
+    "dev:server": "tsx watch server/index.ts",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "tsc && vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "start": "node server-dist/index.js",
+    "preview": "npm run build && npm run start",
+    "lint": "npm run lint:client && npm run lint:server",
+    "lint:client": "tsc --noEmit",
+    "lint:server": "tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.10",
@@ -18,23 +25,33 @@
     "@solana/web3.js": "^1.95.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "helmet": "^8.1.0",
     "lucide-react": "^0.523.0",
     "react": "^18",
     "react-dom": "^18",
     "react-icons": "^5.5.0",
+    "react-window": "1.8.10",
     "tailwind-merge": "^3.3.1",
-    "tailwindcss-animate": "^1.0.7"
+    "tailwindcss-animate": "^1.0.7",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.16",
+    "@types/express": "^5.0.6",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
-    "autoprefixer": "^10.4.21",
-    "vite": "^6",
+    "@types/react-window": "1.8.8",
     "@vitejs/plugin-react": "^4",
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^9.2.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5"
+    "tsx": "^4.21.0",
+    "typescript": "^5",
+    "vite": "^6",
+    "vite-plugin-node-polyfills": "^0.25.0"
   }
 }

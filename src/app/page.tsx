@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { Connection, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js'
 import { createBurnCheckedInstruction, createCloseAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token'
 import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles } from 'lucide-react'
+import { VariableSizeList } from 'react-window'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'
 import Navbar from '../components/Navbar'
 import {
+  displayAmountFromRaw,
   fetchWalletTokenBalances,
   getTokenDisplayName,
   formatPrice,
@@ -21,7 +23,6 @@ import {
   getJupiterQuote,
   getMaxPriorityFeeLamports,
   SOL_MINT,
-  toRawAmount,
 } from '../lib/swapService'
 
 interface TokenMetadata {
@@ -35,6 +36,7 @@ interface TokenMetadata {
 
 interface Token {
   mint: string
+  amountRaw: string
   amount: number
   metadata?: TokenMetadata | null
   price?: number | null
@@ -136,9 +138,21 @@ const TRADEABILITY_PROBE_CONCURRENCY = 6
 const LAZY_PROBE_INITIAL_LIMIT = 60
 const LAZY_PROBE_STEP = 40
 const LAZY_PROBE_SCROLL_OFFSET_PX = 900
+const TOKEN_ROW_HEIGHT_PX = 124
+const TOKEN_ROW_EXECUTION_HEIGHT_PX = 48
+const TOKEN_VIRTUALIZATION_THRESHOLD = 80
+const TOKEN_VIRTUAL_MAX_HEIGHT_PX = 680
+const TOKEN_VIRTUAL_OVERSCAN = 8
+
+function normalizeRawAmount(rawAmount: string): string {
+  const trimmed = rawAmount.trim()
+  if (!/^\d+$/.test(trimmed)) return '0'
+  const normalized = trimmed.replace(/^0+/, '')
+  return normalized || '0'
+}
 
 function isSellableToken(token: Token): boolean {
-  return token.amount > 0 && token.mint !== SOL_MINT
+  return token.mint !== SOL_MINT && normalizeRawAmount(token.amountRaw) !== '0'
 }
 
 function errorMessage(error: unknown): string {
@@ -225,6 +239,11 @@ function formatShareReclaimedLabel(lamportsEstimate: bigint | null): string {
   return `${formatLamportsAsSol(lamportsEstimate, 3)} SOL`
 }
 
+function formatTokenAmount(amount: number): string {
+  if (!Number.isFinite(amount) || amount < 0) return '0'
+  return amount.toLocaleString()
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -293,6 +312,32 @@ function swapFailureMessage(token: Token, error: unknown): string {
 function parseUnsignedBigInt(value: unknown): bigint | null {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
   return BigInt(value)
+}
+
+function parseRecentActivityItem(value: unknown, index: number): RecentActivityItem | null {
+  if (typeof value !== 'object' || value === null) return null
+
+  const item = value as Partial<RecentActivityItem>
+  if (typeof item.signature !== 'string' || item.signature.length === 0) return null
+  if (typeof item.mint !== 'string' || item.mint.length === 0) return null
+  if (typeof item.tokenLabel !== 'string' || item.tokenLabel.length === 0) return null
+  if (typeof item.tokenAmount !== 'number' || !Number.isFinite(item.tokenAmount) || item.tokenAmount < 0) return null
+
+  const timestamp = typeof item.timestamp === 'number' && Number.isFinite(item.timestamp) && item.timestamp > 0
+    ? item.timestamp
+    : Date.now()
+  const id = typeof item.id === 'string' && item.id.length > 0
+    ? item.id
+    : `${item.signature}-${timestamp}-${index}`
+
+  return {
+    id,
+    signature: item.signature,
+    mint: item.mint,
+    tokenLabel: item.tokenLabel,
+    tokenAmount: item.tokenAmount,
+    timestamp,
+  }
 }
 
 async function findCleanupTokenAccount(
@@ -430,6 +475,7 @@ export function Home() {
   const [selectedMints, setSelectedMints] = useState<Set<string>>(new Set())
   const [isSelling, setIsSelling] = useState(false)
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false)
+  const [allowNoRouteCleanup, setAllowNoRouteCleanup] = useState(false)
   const [sellResults, setSellResults] = useState<Record<string, ExecutionResult>>({})
   const [sellSummary, setSellSummary] = useState<SellSummary | null>(null)
   const [globalError, setGlobalError] = useState<string | null>(null)
@@ -475,6 +521,7 @@ export function Home() {
   })
 
   const fetchControllerRef = useRef<AbortController | null>(null)
+  const toastTimeoutsRef = useRef<Map<number, number>>(new Map())
   const toastCounterRef = useRef(0)
   const progressCounterRef = useRef(0)
   const estimateForceRefreshRef = useRef(false)
@@ -499,22 +546,38 @@ export function Home() {
   }, [usdQuoteStatusByMint])
 
   useEffect(() => {
+    let intervalMs = 0
+    if (sellEstimate.loading || progressEvents.length > 0) {
+      intervalMs = 1_000
+    } else if (sellEstimate.lastUpdatedAt || recentActivity.length > 0) {
+      intervalMs = 5_000
+    }
+
+    if (intervalMs === 0) {
+      return
+    }
+
+    setNowMs(Date.now())
     const interval = window.setInterval(() => {
       setNowMs(Date.now())
-    }, 1000)
+    }, intervalMs)
 
     return () => {
       window.clearInterval(interval)
     }
-  }, [])
+  }, [sellEstimate.loading, sellEstimate.lastUpdatedAt, progressEvents.length, recentActivity.length])
 
   useEffect(() => {
     try {
       const storedActivity = localStorage.getItem(RECENT_ACTIVITY_STORAGE_KEY)
       if (storedActivity) {
-        const parsed = JSON.parse(storedActivity) as RecentActivityItem[]
+        const parsed = JSON.parse(storedActivity) as unknown
         if (Array.isArray(parsed)) {
-          setRecentActivity(parsed.filter(item => item && typeof item.signature === 'string').slice(0, 30))
+          const hydrated = parsed
+            .map((item, index) => parseRecentActivityItem(item, index))
+            .filter((item): item is RecentActivityItem => item !== null)
+            .slice(0, 30)
+          setRecentActivity(hydrated)
         }
       }
     } catch {
@@ -531,6 +594,10 @@ export function Home() {
 
   useEffect(() => {
     return () => {
+      for (const timeoutId of toastTimeoutsRef.current.values()) {
+        window.clearTimeout(timeoutId)
+      }
+      toastTimeoutsRef.current.clear()
       if (shareCopiedResetTimerRef.current !== null) {
         window.clearTimeout(shareCopiedResetTimerRef.current)
       }
@@ -539,6 +606,11 @@ export function Home() {
   }, [])
 
   function removeToast(id: number) {
+    const timeoutId = toastTimeoutsRef.current.get(id)
+    if (typeof timeoutId === 'number') {
+      window.clearTimeout(timeoutId)
+      toastTimeoutsRef.current.delete(id)
+    }
     setToasts(prev => prev.filter(toast => toast.id !== id))
   }
 
@@ -557,10 +629,17 @@ export function Home() {
       },
     ])
 
-    setTimeout(() => {
+    const timeoutId = window.setTimeout(() => {
+      toastTimeoutsRef.current.delete(id)
       removeToast(id)
     }, 7000)
+    toastTimeoutsRef.current.set(id, timeoutId)
   }
+
+  const probeTokensSignature = useMemo(
+    () => tokens.map(token => `${token.mint}:${token.amountRaw}:${token.metadata?.decimals ?? 0}`).join('|'),
+    [tokens]
+  )
 
   function appendProgressEvent(mint: string, state: ExecutionState, message: string) {
     const token = tokens.find(item => item.mint === mint)
@@ -784,7 +863,7 @@ export function Home() {
           const currentTradabilityStatus = tradabilityByMintRef.current[token.mint]
           const currentUsdQuoteStatus = usdQuoteStatusByMintRef.current[token.mint]
           const decimals = token.metadata?.decimals ?? 0
-          const rawAmount = toRawAmount(token.amount, decimals)
+          const rawAmount = normalizeRawAmount(token.amountRaw)
           if (rawAmount === '0') {
             return {
               mint: token.mint,
@@ -832,7 +911,8 @@ export function Home() {
                 const outAmountRaw = getQuoteOutAmountRaw(usdQuote)
                 if (outAmountRaw) {
                   const impliedUsdTotal = Number(outAmountRaw) / 1_000_000
-                  const impliedUnitPrice = impliedUsdTotal / token.amount
+                  const baseTokenAmount = displayAmountFromRaw(rawAmount, decimals)
+                  const impliedUnitPrice = baseTokenAmount > 0 ? impliedUsdTotal / baseTokenAmount : 0
                   if (Number.isFinite(impliedUnitPrice) && impliedUnitPrice > 0) {
                     impliedPrice = impliedUnitPrice
                     usdQuoteStatus = 'priced'
@@ -907,7 +987,7 @@ export function Home() {
     connected,
     publicKey,
     isSelling,
-    tokens,
+    probeTokensSignature,
     tokenProbeLimit,
     effectiveSlippageBps,
     searchQuery,
@@ -983,6 +1063,32 @@ export function Home() {
     () => visibleTokens.filter(isSellableToken),
     [visibleTokens]
   )
+
+  const shouldVirtualizeTokenRows = visibleTokens.length >= TOKEN_VIRTUALIZATION_THRESHOLD
+  const getVirtualizedTokenRowHeight = (index: number) => {
+    const token = visibleTokens[index]
+    if (!token) return TOKEN_ROW_HEIGHT_PX
+    return sellResults[token.mint] ? TOKEN_ROW_HEIGHT_PX + TOKEN_ROW_EXECUTION_HEIGHT_PX : TOKEN_ROW_HEIGHT_PX
+  }
+
+  const virtualizedTokenContentHeight = useMemo(
+    () => visibleTokens.reduce(
+      (height, token) => height + (sellResults[token.mint] ? TOKEN_ROW_HEIGHT_PX + TOKEN_ROW_EXECUTION_HEIGHT_PX : TOKEN_ROW_HEIGHT_PX),
+      0
+    ),
+    [visibleTokens, sellResults]
+  )
+
+  const virtualizedTokenListHeight = useMemo(
+    () => Math.min(TOKEN_VIRTUAL_MAX_HEIGHT_PX, Math.max(TOKEN_ROW_HEIGHT_PX * 4, virtualizedTokenContentHeight)),
+    [virtualizedTokenContentHeight]
+  )
+
+  const tokenListVirtualizerRef = useRef<VariableSizeList | null>(null)
+
+  useEffect(() => {
+    tokenListVirtualizerRef.current?.resetAfterIndex(0)
+  }, [visibleTokens.length, sellResults])
 
   const noRouteTokenCount = useMemo(
     () => sellableTokens.filter(token => tradabilityByMint[token.mint] === 'untradable').length,
@@ -1157,8 +1263,7 @@ export function Home() {
             return { outLamports: BigInt(0), quoted: false, failed: true }
           }
 
-          const decimals = token.metadata?.decimals ?? 0
-          const rawAmount = toRawAmount(token.amount, decimals)
+          const rawAmount = normalizeRawAmount(token.amountRaw)
 
           if (rawAmount === '0') {
             return { outLamports: BigInt(0), quoted: false, failed: true }
@@ -1374,7 +1479,10 @@ export function Home() {
     }
   }
 
-  async function executeSellRun(targetTokens: Token[], options: { resetResults: boolean; resetSummary: boolean }) {
+  async function executeSellRun(
+    targetTokens: Token[],
+    options: { resetResults: boolean; resetSummary: boolean; allowNoRouteCleanup: boolean }
+  ) {
     if (!connected || !publicKey || isSelling) {
       return
     }
@@ -1504,8 +1612,7 @@ export function Home() {
           continue
         }
 
-        const decimals = token.metadata?.decimals ?? 0
-        const rawAmount = toRawAmount(token.amount, decimals)
+        const rawAmount = normalizeRawAmount(token.amountRaw)
 
         if (rawAmount === '0') {
           skipped += 1
@@ -1525,10 +1632,19 @@ export function Home() {
               slippageBps: effectiveSlippageBps,
             })
           } catch (error) {
-            if (hasNoRouteError(errorMessage(error))) {
+            if (options.allowNoRouteCleanup && hasNoRouteError(errorMessage(error))) {
               await handleNoRouteFallback(token)
               continue
             }
+
+            if (hasNoRouteError(errorMessage(error))) {
+              const message = `No route found for ${tokenLabel(token)}. Enable burn+close fallback to reclaim rent for untradable tokens.`
+              failed += 1
+              updateSellResult(token.mint, { state: 'failed', message })
+              pushToast('error', message)
+              continue
+            }
+
             const message = quoteFailureMessage(token, error)
             failed += 1
             updateSellResult(token.mint, { state: 'failed', message })
@@ -1555,10 +1671,19 @@ export function Home() {
               outLamportsEstimate: outAmountRaw ? BigInt(outAmountRaw) : BigInt(0),
             })
           } catch (error) {
-            if (hasNoRouteError(errorMessage(error))) {
+            if (options.allowNoRouteCleanup && hasNoRouteError(errorMessage(error))) {
               await handleNoRouteFallback(token)
               continue
             }
+
+            if (hasNoRouteError(errorMessage(error))) {
+              const message = `No route found for ${tokenLabel(token)}. Enable burn+close fallback to reclaim rent for untradable tokens.`
+              failed += 1
+              updateSellResult(token.mint, { state: 'failed', message })
+              pushToast('error', message)
+              continue
+            }
+
             const message = `Swap build failed for ${tokenLabel(token)}: ${errorMessage(error)}`
             failed += 1
             updateSellResult(token.mint, { state: 'failed', message })
@@ -1786,6 +1911,7 @@ export function Home() {
       return
     }
 
+    setAllowNoRouteCleanup(false)
     setIsConfirmModalOpen(true)
   }
 
@@ -1794,6 +1920,7 @@ export function Home() {
     await executeSellRun(selectedTokensForSell, {
       resetResults: true,
       resetSummary: true,
+      allowNoRouteCleanup,
     })
   }
 
@@ -1813,7 +1940,162 @@ export function Home() {
     await executeSellRun([token], {
       resetResults: false,
       resetSummary: false,
+      allowNoRouteCleanup: false,
     })
+  }
+
+  function renderTokenRow(token: Token, index: number, rowStyle?: CSSProperties) {
+    const execution = sellResults[token.mint]
+    const selected = selectedMints.has(token.mint)
+    const sellable = isSellableToken(token)
+    const verificationLevel = getVerificationLevel(token.metadata || null)
+    const tradabilityStatus = tradabilityByMint[token.mint]
+    const usdQuoteStatus = usdQuoteStatusByMint[token.mint]
+    const tokenStatusLabel = sellable && tradabilityStatus === 'untradable'
+      ? 'no-route'
+      : sellable && tradabilityStatus === 'checking'
+        ? 'checking'
+        : verificationLevel
+    const txUrl = execution?.signature ? `https://solscan.io/tx/${execution.signature}` : null
+    const usdValue = tokenValueUsd(token)
+    const usdValueResolving = usdQuoteStatus === 'checking' || usdQuoteStatus === 'unknown'
+    const name = token.metadata
+      ? getTokenDisplayName(token.mint, token.metadata)
+      : 'Unknown'
+
+    return (
+      <div
+        key={rowStyle ? undefined : token.mint}
+        className={cn(!sellable && 'opacity-30')}
+        style={rowStyle ?? {
+          animation: `fadeUp 0.25s ease-out ${Math.min(index * 0.02, 0.5)}s both`,
+        }}
+      >
+        <div
+          className={cn(
+            'grid grid-cols-[32px_1fr_90px] md:grid-cols-[32px_1fr_80px_100px_90px] gap-3 items-center py-3 border-b border-border/40 transition-all duration-150',
+            selected
+              ? 'bg-foreground/[0.04] border-l-2 border-l-primary pl-2.5 md:pl-0.5'
+              : 'border-l-2 border-l-transparent pl-2.5 md:pl-0.5',
+            sellable && !isSelling && 'hover:bg-foreground/[0.025] cursor-pointer'
+          )}
+          onClick={() => sellable && !isSelling && toggleMintSelection(token.mint)}
+        >
+          <div className="flex justify-center">
+            <div
+              className={cn(
+                'w-4 h-4 border flex items-center justify-center transition-all duration-150',
+                selected
+                  ? 'border-primary bg-primary'
+                  : 'border-muted-foreground/25 hover:border-muted-foreground/50',
+                isSelling && 'opacity-40'
+              )}
+            >
+              {selected && (
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <path d="M2 5L4 7L8 3" stroke="hsl(var(--background))" strokeWidth="1.5" strokeLinecap="square" />
+                </svg>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 min-w-0">
+            <Avatar className="h-7 w-7 shrink-0 rounded-none border border-border/50">
+              <AvatarImage src={token.metadata?.logoURI} />
+              <AvatarFallback className="rounded-none bg-muted text-muted-foreground text-[9px] font-mono">
+                {token.metadata?.symbol?.charAt(0) || '?'}
+              </AvatarFallback>
+            </Avatar>
+            <div className="min-w-0">
+              <div className="flex items-baseline gap-2">
+                <span className="font-mono text-sm truncate">{name}</span>
+                <span className="font-mono text-[10px] text-muted-foreground/50 hidden sm:inline">
+                  {truncateAddress(token.mint)}
+                </span>
+              </div>
+              <span className={cn(
+                'mt-1 block font-mono text-[9px] uppercase tracking-wider md:hidden',
+                tokenStatusLabel === 'no-route'
+                  ? 'text-[hsl(var(--status-warning))]'
+                  : verificationLevel === 'strict' || verificationLevel === 'verified'
+                  ? 'text-foreground/40'
+                  : 'text-muted-foreground/60'
+              )}>
+                {tokenStatusLabel}
+              </span>
+            </div>
+          </div>
+
+          <div className="hidden md:block">
+            <span className={cn(
+              'font-mono text-[10px] uppercase tracking-wider',
+              tokenStatusLabel === 'no-route'
+                ? 'text-[hsl(var(--status-warning))]'
+                : verificationLevel === 'strict' || verificationLevel === 'verified'
+                ? 'text-foreground/50'
+                : 'text-muted-foreground/60'
+            )}>
+              {tokenStatusLabel}
+            </span>
+          </div>
+
+          <div className="hidden md:block text-right">
+            <span className="font-mono text-xs tabular-nums">
+              {formatTokenAmount(token.amount)}
+            </span>
+          </div>
+
+          <div className="text-right">
+            <span className={cn(
+              'font-mono text-xs tabular-nums',
+              usdValue !== null && usdValue < dustThresholdUsd && 'text-muted-foreground'
+            )}>
+              {usdValue !== null
+                ? formatPrice(usdValue)
+                : usdValueResolving ? '...' : '--'}
+            </span>
+            <span className="block md:hidden font-mono text-[10px] text-muted-foreground/50 tabular-nums">
+              {formatTokenAmount(token.amount)}
+            </span>
+          </div>
+        </div>
+
+        {execution && (
+          <div
+            className="py-2.5 pl-[44px] pr-1 border-b border-border/20 font-mono text-[11px] text-muted-foreground flex items-center gap-2.5 bg-muted/30"
+            style={{ animation: 'fadeIn 0.2s ease-out' }}
+          >
+            <Badge variant={executionBadgeVariant(execution.state)}>
+              {executionLabel(execution.state)}
+            </Badge>
+            <span className="truncate">{execution.message}</span>
+            {execution.state === 'failed' && !isSelling && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void retryToken(token.mint)
+                }}
+                className="shrink-0 px-1.5 py-0.5 border border-border hover:bg-accent transition-colors text-[10px] uppercase tracking-wider"
+              >
+                retry
+              </button>
+            )}
+            {txUrl && (
+              <a
+                href={txUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="shrink-0 underline underline-offset-2 hover:text-foreground transition-colors"
+                onClick={(e) => e.stopPropagation()}
+              >
+                view tx
+              </a>
+            )}
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -1875,6 +2157,18 @@ export function Home() {
             <div className="mt-4 text-[11px] text-muted-foreground">
               Slippage: {formatSlippageBps(effectiveSlippageBps)}. Quotes: {quoteAgeLabel}.
             </div>
+            <label className="mt-3 flex items-start gap-2 text-[11px] text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={allowNoRouteCleanup}
+                onChange={(event) => setAllowNoRouteCleanup(event.target.checked)}
+                className="mt-0.5"
+                disabled={isSelling}
+              />
+              <span>
+                Enable burn+close fallback for no-route tokens (irreversible).
+              </span>
+            </label>
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
                 type="button"
@@ -2356,7 +2650,7 @@ export function Home() {
                   {recentActivity.slice(0, 8).map(activity => (
                     <div key={activity.id} className="flex items-center gap-2.5 px-2.5 py-2 border-b border-border/30 last:border-b-0">
                       <span className="min-w-0 truncate">
-                        Sold {activity.tokenAmount.toLocaleString()} {activity.tokenLabel}
+                        Sold {formatTokenAmount(activity.tokenAmount)} {activity.tokenLabel}
                       </span>
                       <span className="ml-auto text-[10px] text-muted-foreground/70 tabular-nums">
                         {formatTimeAgo(activity.timestamp, nowMs)}
@@ -2391,159 +2685,27 @@ export function Home() {
                     <div className="text-right">Value</div>
                   </div>
 
-                  {visibleTokens.map((token, index) => {
-                    const execution = sellResults[token.mint]
-                    const selected = selectedMints.has(token.mint)
-                    const sellable = isSellableToken(token)
-                    const verificationLevel = getVerificationLevel(token.metadata || null)
-                    const tradabilityStatus = tradabilityByMint[token.mint]
-                    const usdQuoteStatus = usdQuoteStatusByMint[token.mint]
-                    const tokenStatusLabel = sellable && tradabilityStatus === 'untradable'
-                      ? 'no-route'
-                      : sellable && tradabilityStatus === 'checking'
-                        ? 'checking'
-                        : verificationLevel
-                    const txUrl = execution?.signature ? `https://solscan.io/tx/${execution.signature}` : null
-                    const usdValue = tokenValueUsd(token)
-                    const usdValueResolving = usdQuoteStatus === 'checking' || usdQuoteStatus === 'unknown'
-                    const name = token.metadata
-                      ? getTokenDisplayName(token.mint, token.metadata)
-                      : 'Unknown'
-
-                    return (
-                      <div
-                        key={token.mint}
-                        className={cn(!sellable && 'opacity-30')}
-                        style={{
-                          animation: `fadeUp 0.25s ease-out ${Math.min(index * 0.02, 0.5)}s both`,
-                        }}
-                      >
-                        <div
-                          className={cn(
-                            'grid grid-cols-[32px_1fr_90px] md:grid-cols-[32px_1fr_80px_100px_90px] gap-3 items-center py-3 border-b border-border/40 transition-all duration-150',
-                            selected
-                              ? 'bg-foreground/[0.04] border-l-2 border-l-primary pl-2.5 md:pl-0.5'
-                              : 'border-l-2 border-l-transparent pl-2.5 md:pl-0.5',
-                            sellable && !isSelling && 'hover:bg-foreground/[0.025] cursor-pointer'
-                          )}
-                          onClick={() => sellable && !isSelling && toggleMintSelection(token.mint)}
-                        >
-                          <div className="flex justify-center">
-                            <div
-                              className={cn(
-                                'w-4 h-4 border flex items-center justify-center transition-all duration-150',
-                                selected
-                                  ? 'border-primary bg-primary'
-                                  : 'border-muted-foreground/25 hover:border-muted-foreground/50',
-                                isSelling && 'opacity-40'
-                              )}
-                            >
-                              {selected && (
-                                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                                  <path d="M2 5L4 7L8 3" stroke="hsl(var(--background))" strokeWidth="1.5" strokeLinecap="square" />
-                                </svg>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-3 min-w-0">
-                            <Avatar className="h-7 w-7 shrink-0 rounded-none border border-border/50">
-                              <AvatarImage src={token.metadata?.logoURI} />
-                              <AvatarFallback className="rounded-none bg-muted text-muted-foreground text-[9px] font-mono">
-                                {token.metadata?.symbol?.charAt(0) || '?'}
-                              </AvatarFallback>
-                            </Avatar>
-                            <div className="min-w-0">
-                              <div className="flex items-baseline gap-2">
-                                <span className="font-mono text-sm truncate">{name}</span>
-                                <span className="font-mono text-[10px] text-muted-foreground/50 hidden sm:inline">
-                                  {truncateAddress(token.mint)}
-                                </span>
-                              </div>
-                              <span className={cn(
-                                'mt-1 block font-mono text-[9px] uppercase tracking-wider md:hidden',
-                                tokenStatusLabel === 'no-route'
-                                  ? 'text-[hsl(var(--status-warning))]'
-                                  : verificationLevel === 'strict' || verificationLevel === 'verified'
-                                  ? 'text-foreground/40'
-                                  : 'text-muted-foreground/60'
-                              )}>
-                                {tokenStatusLabel}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="hidden md:block">
-                            <span className={cn(
-                              'font-mono text-[10px] uppercase tracking-wider',
-                              tokenStatusLabel === 'no-route'
-                                ? 'text-[hsl(var(--status-warning))]'
-                                : verificationLevel === 'strict' || verificationLevel === 'verified'
-                                ? 'text-foreground/50'
-                                : 'text-muted-foreground/60'
-                            )}>
-                              {tokenStatusLabel}
-                            </span>
-                          </div>
-
-                          <div className="hidden md:block text-right">
-                            <span className="font-mono text-xs tabular-nums">
-                              {token.amount?.toLocaleString() || '0'}
-                            </span>
-                          </div>
-
-                          <div className="text-right">
-                            <span className={cn(
-                              'font-mono text-xs tabular-nums',
-                              usdValue !== null && usdValue < dustThresholdUsd && 'text-muted-foreground'
-                            )}>
-                              {usdValue !== null
-                                ? formatPrice(usdValue)
-                                : usdValueResolving ? '...' : '--'}
-                            </span>
-                            <span className="block md:hidden font-mono text-[10px] text-muted-foreground/50 tabular-nums">
-                              {token.amount?.toLocaleString() || '0'}
-                            </span>
-                          </div>
-                        </div>
-
-                        {execution && (
-                          <div
-                            className="py-2.5 pl-[44px] pr-1 border-b border-border/20 font-mono text-[11px] text-muted-foreground flex items-center gap-2.5 bg-muted/30"
-                            style={{ animation: 'fadeIn 0.2s ease-out' }}
-                          >
-                            <Badge variant={executionBadgeVariant(execution.state)}>
-                              {executionLabel(execution.state)}
-                            </Badge>
-                            <span className="truncate">{execution.message}</span>
-                            {execution.state === 'failed' && !isSelling && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  void retryToken(token.mint)
-                                }}
-                                className="shrink-0 px-1.5 py-0.5 border border-border hover:bg-accent transition-colors text-[10px] uppercase tracking-wider"
-                              >
-                                retry
-                              </button>
-                            )}
-                            {txUrl && (
-                              <a
-                                href={txUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="shrink-0 underline underline-offset-2 hover:text-foreground transition-colors"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                view tx
-                              </a>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
+                  {shouldVirtualizeTokenRows ? (
+                    <VariableSizeList
+                      ref={tokenListVirtualizerRef}
+                      height={virtualizedTokenListHeight}
+                      width="100%"
+                      itemCount={visibleTokens.length}
+                      itemSize={getVirtualizedTokenRowHeight}
+                      overscanCount={TOKEN_VIRTUAL_OVERSCAN}
+                      itemKey={(index) => visibleTokens[index]?.mint ?? index}
+                      onScroll={({ scrollOffset, scrollUpdateWasRequested }) => {
+                        if (scrollUpdateWasRequested) return
+                        const nearBottom = scrollOffset + virtualizedTokenListHeight >= virtualizedTokenContentHeight - LAZY_PROBE_SCROLL_OFFSET_PX
+                        if (!nearBottom) return
+                        setTokenProbeLimit(prev => Math.min(prev + LAZY_PROBE_STEP, tokens.length))
+                      }}
+                    >
+                      {({ index, style }) => renderTokenRow(visibleTokens[index], index, style)}
+                    </VariableSizeList>
+                  ) : (
+                    visibleTokens.map((token, index) => renderTokenRow(token, index))
+                  )}
                 </div>
               ) : (
                 <div className="py-20 flex flex-col items-center gap-3">

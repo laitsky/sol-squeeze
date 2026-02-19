@@ -17,7 +17,7 @@ interface LocalTokenInfo {
 
 interface HeliusWalletBalance {
   mint?: string;
-  balance?: number;
+  balance?: number | string;
   decimals?: number;
   symbol?: string;
   name?: string;
@@ -36,6 +36,7 @@ interface HeliusWalletBalancesResponse {
 
 export interface WalletTokenBalance {
   mint: string;
+  amountRaw: string;
   amount: number;
   metadata: TokenMetadata | null;
   price: number | null;
@@ -47,7 +48,7 @@ export interface FetchTokensOptions {
   onFirstPage?: (tokens: WalletTokenBalance[]) => void;
 }
 
-export type TokenServiceErrorCode = 'MISSING_API_KEY' | 'API_ERROR';
+export type TokenServiceErrorCode = 'API_ERROR';
 
 export class TokenServiceError extends Error {
   code: TokenServiceErrorCode;
@@ -80,44 +81,166 @@ const LOCAL_TOKEN_REGISTRY: Record<string, LocalTokenInfo> = {
   },
 };
 
+const DEFAULT_BACKEND_BASE_URL = '';
+const MAX_TOKEN_DECIMALS = 30;
+
+function clampTokenDecimals(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(Math.floor(value), MAX_TOKEN_DECIMALS));
+}
+
+function toPlainNumberString(value: number): string {
+  const valueStr = String(value);
+  if (!/[eE]/.test(valueStr)) {
+    return valueStr;
+  }
+
+  const [mantissa, exponentPart] = valueStr.toLowerCase().split('e');
+  const exponent = parseInt(exponentPart, 10);
+  if (Number.isNaN(exponent)) {
+    return valueStr;
+  }
+
+  const negative = mantissa.startsWith('-');
+  const normalizedMantissa = negative ? mantissa.slice(1) : mantissa;
+  const [whole, fraction = ''] = normalizedMantissa.split('.');
+  const digits = `${whole}${fraction}`.replace(/^0+/, '') || '0';
+
+  if (exponent >= 0) {
+    const zeros = exponent - fraction.length;
+    if (zeros >= 0) {
+      return `${negative ? '-' : ''}${digits}${'0'.repeat(zeros)}`;
+    }
+    const pivot = digits.length + zeros;
+    return `${negative ? '-' : ''}${digits.slice(0, pivot)}.${digits.slice(pivot)}`;
+  }
+
+  const absoluteExponent = Math.abs(exponent);
+  const integerLength = whole.length;
+  const pivot = integerLength - absoluteExponent;
+  if (pivot > 0) {
+    return `${negative ? '-' : ''}${digits.slice(0, pivot)}.${digits.slice(pivot)}`;
+  }
+
+  return `${negative ? '-' : ''}0.${'0'.repeat(Math.abs(pivot))}${digits}`;
+}
+
+function decimalValueToRawAmount(value: number | string, decimals: number): bigint | null {
+  const safeDecimals = clampTokenDecimals(decimals);
+
+  let plain: string;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    plain = toPlainNumberString(value);
+  } else {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    plain = trimmed;
+  }
+
+  if (plain.startsWith('-')) {
+    return null;
+  }
+
+  if (!/^\d+(\.\d+)?$/.test(plain)) {
+    return null;
+  }
+
+  const [wholePart, fractionPart = ''] = plain.split('.');
+  const wholeDigits = wholePart.replace(/\D/g, '') || '0';
+  const fractionDigits = fractionPart.replace(/\D/g, '');
+  const paddedFraction = `${fractionDigits}${'0'.repeat(safeDecimals)}`;
+  const raw = `${wholeDigits}${paddedFraction.slice(0, safeDecimals)}`.replace(/^0+/, '');
+
+  return BigInt(raw || '0');
+}
+
+function rawAmountToDisplayAmount(rawAmount: bigint, decimals: number): number {
+  if (rawAmount <= BigInt(0)) return 0;
+
+  const safeDecimals = clampTokenDecimals(decimals);
+  if (safeDecimals === 0) {
+    const asNumber = Number(rawAmount.toString());
+    return Number.isFinite(asNumber) ? asNumber : Number.MAX_VALUE;
+  }
+
+  const rawText = rawAmount.toString();
+  const wholePart = rawText.length > safeDecimals
+    ? rawText.slice(0, rawText.length - safeDecimals)
+    : '0';
+  const fractionPart = rawText.length > safeDecimals
+    ? rawText.slice(rawText.length - safeDecimals)
+    : rawText.padStart(safeDecimals, '0');
+  const normalizedFraction = fractionPart.replace(/0+$/, '');
+  const decimalText = normalizedFraction ? `${wholePart}.${normalizedFraction}` : wholePart;
+  const parsed = Number(decimalText);
+
+  return Number.isFinite(parsed) ? parsed : Number.MAX_VALUE;
+}
+
+function parseRawAmount(value: string): bigint {
+  if (!/^\d+$/.test(value)) return BigInt(0);
+  return BigInt(value);
+}
+
+function getBackendBaseUrl(): string {
+  const configured = import.meta.env.VITE_BACKEND_API_URL;
+  if (!configured) {
+    return DEFAULT_BACKEND_BASE_URL;
+  }
+
+  try {
+    const parsed = new URL(configured);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Unsupported protocol');
+    }
+
+    const normalizedPath = parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.origin}${normalizedPath}`;
+  } catch {
+    console.warn('Invalid VITE_BACKEND_API_URL; falling back to same-origin API routes.');
+    return DEFAULT_BACKEND_BASE_URL;
+  }
+}
+
+function apiUrl(path: string): string {
+  const baseUrl = getBackendBaseUrl();
+  if (!baseUrl) {
+    return path;
+  }
+
+  return `${baseUrl}${path}`;
+}
+
+export function displayAmountFromRaw(rawAmount: string, decimals: number): number {
+  const rawValue = parseRawAmount(rawAmount);
+  return rawAmountToDisplayAmount(rawValue, decimals);
+}
+
 function resolveImageUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
 
-  if (url.startsWith('ipfs://')) {
-    const cid = url.replace('ipfs://', '');
+  const trimmed = url.trim();
+  if (!trimmed) return undefined;
+
+  if (trimmed.startsWith('ipfs://')) {
+    const cid = trimmed.replace('ipfs://', '');
     return `https://ipfs.io/ipfs/${cid}`;
   }
 
-  return url;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:') {
+      return undefined;
+    }
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function getFallbackTokenName(mint: string): string {
   return `Token ${mint.slice(0, 4)}...${mint.slice(-4)}`;
-}
-
-function getHeliusApiKey(): string | null {
-  const explicitKey = import.meta.env.VITE_HELIUS_API_KEY;
-  if (explicitKey) {
-    return explicitKey;
-  }
-
-  const rpcUrl = import.meta.env.VITE_SOLANA_RPC_URL;
-  if (!rpcUrl) {
-    return null;
-  }
-
-  try {
-    const parsedUrl = new URL(rpcUrl);
-    return parsedUrl.searchParams.get('api-key');
-  } catch (error) {
-    console.warn('Failed to parse VITE_SOLANA_RPC_URL for api-key:', error);
-    return null;
-  }
-}
-
-function getHeliusWalletApiBaseUrl(): string {
-  const baseUrl = import.meta.env.VITE_HELIUS_WALLET_API_URL || 'https://api.helius.xyz';
-  return baseUrl.replace(/\/+$/, '');
 }
 
 function errorMessage(error: unknown): string {
@@ -136,17 +259,8 @@ export async function fetchWalletTokenBalances(
     return [];
   }
 
-  const apiKey = getHeliusApiKey();
-  if (!apiKey) {
-    throw new TokenServiceError(
-      'MISSING_API_KEY',
-      'Helius API key missing. Set VITE_HELIUS_API_KEY or include api-key in VITE_SOLANA_RPC_URL.'
-    );
-  }
-
   const signal = options?.signal;
   const onFirstPage = options?.onFirstPage;
-  const baseUrl = getHeliusWalletApiBaseUrl();
   const tokenMap = new Map<string, WalletTokenBalance>();
   const pageSize = 100;
   const maxPages = 50;
@@ -154,49 +268,57 @@ export async function fetchWalletTokenBalances(
 
   async function fetchPage(page: number): Promise<HeliusWalletBalancesResponse> {
     const params = new URLSearchParams({
-      'api-key': apiKey!,
       page: page.toString(),
       limit: pageSize.toString(),
-      showNative: 'false',
-      showNfts: 'false',
-      showZeroBalance: 'false',
     });
 
     const response = await fetch(
-      `${baseUrl}/v1/wallet/${encodeURIComponent(walletAddress)}/balances?${params.toString()}`,
+      `${apiUrl(`/api/wallet/${encodeURIComponent(walletAddress)}/balances`)}?${params.toString()}`,
       {
         method: 'GET',
         headers: {
           Accept: 'application/json',
-          'x-api-key': apiKey!,
         },
         signal,
       }
     );
 
+    const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      throw new Error(`Helius Wallet API returned ${response.status}`);
+      const apiError =
+        payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+          ? payload.error
+          : null;
+      throw new Error(apiError || `Wallet API returned ${response.status}`);
     }
 
-    return response.json();
+    return (payload || {}) as HeliusWalletBalancesResponse;
   }
 
   function processBalances(balances: HeliusWalletBalance[]) {
     for (const balance of balances) {
       const mint = balance.mint?.trim();
-      if (!mint || typeof balance.balance !== 'number' || balance.balance <= 0) {
+      if (!mint) {
         continue;
       }
 
       const existing = tokenMap.get(mint);
       const localToken = LOCAL_TOKEN_REGISTRY[mint];
+      const decimals = typeof balance.decimals === 'number'
+        ? clampTokenDecimals(balance.decimals)
+        : clampTokenDecimals(localToken?.decimals ?? existing?.metadata?.decimals ?? 0);
+      const balanceRaw = balance.balance === undefined
+        ? null
+        : decimalValueToRawAmount(balance.balance, decimals);
+
+      if (balanceRaw === null || balanceRaw <= BigInt(0)) {
+        continue;
+      }
 
       const metadata: TokenMetadata = {
         name: balance.name || localToken?.name || existing?.metadata?.name || getFallbackTokenName(mint),
         symbol: balance.symbol || localToken?.symbol || existing?.metadata?.symbol || 'UNKNOWN',
-        decimals: typeof balance.decimals === 'number'
-          ? balance.decimals
-          : (localToken?.decimals ?? existing?.metadata?.decimals ?? 0),
+        decimals,
         logoURI: resolveImageUrl(balance.logoUri || existing?.metadata?.logoURI),
         address: mint,
         tags: localToken?.tags || existing?.metadata?.tags || [],
@@ -208,14 +330,18 @@ export async function fetchWalletTokenBalances(
           : existing?.price ?? null;
 
       if (existing) {
-        existing.amount += balance.balance;
+        const nextAmountRaw = parseRawAmount(existing.amountRaw) + balanceRaw;
+        existing.amountRaw = nextAmountRaw.toString();
+        existing.amount = rawAmountToDisplayAmount(nextAmountRaw, metadata.decimals);
         existing.metadata = metadata;
         existing.price = tokenPrice;
         existing.priceFetched = true;
       } else {
+        const amountRaw = balanceRaw.toString();
         tokenMap.set(mint, {
           mint,
-          amount: balance.balance,
+          amountRaw,
+          amount: rawAmountToDisplayAmount(balanceRaw, metadata.decimals),
           metadata,
           price: tokenPrice,
           priceFetched: true,

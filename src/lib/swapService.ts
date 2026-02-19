@@ -29,16 +29,59 @@ interface QuoteCacheEntry {
 }
 
 const quoteCache = new Map<string, QuoteCacheEntry>()
+const inFlightQuoteRequests = new Map<string, Promise<Record<string, unknown>>>()
+const QUOTE_CACHE_MAX_ENTRIES = 500
+const DEFAULT_BACKEND_BASE_URL = ''
 const DEFAULT_MAX_PRIORITY_FEE_LAMPORTS = 0
 const MAX_PRIORITY_FEE_LAMPORTS_CAP = 2_000_000
 
-function getJupiterBaseUrl(): string {
-  const configured = import.meta.env.VITE_JUPITER_SWAP_API_URL || 'https://api.jup.ag'
-  return configured.replace(/\/+$/, '')
+function getBackendBaseUrl(): string {
+  const configured = import.meta.env.VITE_BACKEND_API_URL
+  if (!configured) {
+    return DEFAULT_BACKEND_BASE_URL
+  }
+
+  try {
+    const parsed = new URL(configured)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Unsupported protocol')
+    }
+
+    const normalizedPath = parsed.pathname.replace(/\/+$/, '')
+    return `${parsed.origin}${normalizedPath}`
+  } catch {
+    console.warn('Invalid VITE_BACKEND_API_URL; falling back to same-origin API routes.')
+    return DEFAULT_BACKEND_BASE_URL
+  }
 }
 
-function getJupiterApiKey(): string | null {
-  return import.meta.env.VITE_JUPITER_API_KEY || null
+function apiUrl(path: string): string {
+  const baseUrl = getBackendBaseUrl()
+  if (!baseUrl) {
+    return path
+  }
+
+  return `${baseUrl}${path}`
+}
+
+function pruneQuoteCache() {
+  if (quoteCache.size <= QUOTE_CACHE_MAX_ENTRIES) {
+    return
+  }
+
+  let oldestKey: string | null = null
+  let oldestTimestamp = Number.POSITIVE_INFINITY
+
+  for (const [key, value] of quoteCache.entries()) {
+    if (value.timestamp < oldestTimestamp) {
+      oldestTimestamp = value.timestamp
+      oldestKey = key
+    }
+  }
+
+  if (oldestKey) {
+    quoteCache.delete(oldestKey)
+  }
 }
 
 function parseMaxPriorityFeeLamports(value: string | undefined): number {
@@ -60,15 +103,10 @@ export function getMaxPriorityFeeLamports(): number {
 }
 
 function getJupiterHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  const headers: Record<string, string> = {
+  return {
     Accept: 'application/json',
     ...extra,
   }
-  const apiKey = getJupiterApiKey()
-  if (apiKey) {
-    headers['x-api-key'] = apiKey
-  }
-  return headers
 }
 
 function base64ToUint8Array(base64: string): Uint8Array {
@@ -148,16 +186,21 @@ export async function getJupiterQuote({
   signal,
 }: JupiterQuoteRequest): Promise<Record<string, unknown>> {
   const cacheKey = `${inputMint}:${outputMint}:${amount}:${slippageBps}:${restrictIntermediateTokens}`
-  const now = Date.now()
 
   if (!forceRefresh) {
     const cached = quoteCache.get(cacheKey)
-    if (cached && (now - cached.timestamp) < cacheTtlMs) {
+    if (cached && (Date.now() - cached.timestamp) < cacheTtlMs) {
       return cached.quote
     }
   }
 
-  const baseUrl = getJupiterBaseUrl()
+  if (!forceRefresh && !signal) {
+    const inFlight = inFlightQuoteRequests.get(cacheKey)
+    if (inFlight) {
+      return inFlight
+    }
+  }
+
   const params = new URLSearchParams({
     inputMint,
     outputMint,
@@ -166,49 +209,48 @@ export async function getJupiterQuote({
     restrictIntermediateTokens: String(restrictIntermediateTokens),
   })
 
-  const response = await fetch(`${baseUrl}/swap/v1/quote?${params.toString()}`, {
-    method: 'GET',
-    headers: getJupiterHeaders(),
-    signal,
-  })
+  const request = async () => {
+    const response = await fetch(`${apiUrl('/api/quote')}?${params.toString()}`, {
+      method: 'GET',
+      headers: getJupiterHeaders(),
+      signal,
+    })
 
-  const payload = await response.json()
-  if (!response.ok || payload.error) {
-    throw new Error(payload.error || `Quote API returned ${response.status}`)
+    const payload = await response.json()
+    if (!response.ok || payload.error) {
+      throw new Error(payload.error || `Quote API returned ${response.status}`)
+    }
+
+    quoteCache.set(cacheKey, {
+      quote: payload,
+      timestamp: Date.now(),
+    })
+    pruneQuoteCache()
+
+    return payload
   }
 
-  quoteCache.set(cacheKey, {
-    quote: payload,
-    timestamp: now,
-  })
+  if (forceRefresh || signal) {
+    return request()
+  }
 
-  return payload
+  const inFlight = request().finally(() => {
+    inFlightQuoteRequests.delete(cacheKey)
+  })
+  inFlightQuoteRequests.set(cacheKey, inFlight)
+  return inFlight
 }
 
 export async function buildJupiterSwapTransaction({
   quoteResponse,
   userPublicKey,
 }: JupiterSwapRequest): Promise<{ transaction: VersionedTransaction; lastValidBlockHeight: number }> {
-  const baseUrl = getJupiterBaseUrl()
-  const maxPriorityFeeLamports = getMaxPriorityFeeLamports()
   const body: Record<string, unknown> = {
     quoteResponse,
     userPublicKey,
-    wrapAndUnwrapSol: true,
-    dynamicComputeUnitLimit: true,
-    dynamicSlippage: true,
   }
 
-  if (maxPriorityFeeLamports > 0) {
-    body.prioritizationFeeLamports = {
-      priorityLevelWithMaxLamports: {
-        maxLamports: maxPriorityFeeLamports,
-        priorityLevel: 'high',
-      },
-    }
-  }
-
-  const response = await fetch(`${baseUrl}/swap/v1/swap`, {
+  const response = await fetch(apiUrl('/api/swap'), {
     method: 'POST',
     headers: getJupiterHeaders({
       'Content-Type': 'application/json',
