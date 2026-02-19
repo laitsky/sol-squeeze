@@ -528,6 +528,7 @@ export function Home({ active = true }: { active?: boolean }) {
   const tradabilityProbeControllerRef = useRef<AbortController | null>(null)
   const tradabilityByMintRef = useRef<Record<string, TradabilityStatus>>({})
   const usdQuoteStatusByMintRef = useRef<Record<string, UsdQuoteStatus>>({})
+  const effectiveSlippageBpsRef = useRef(0)
 
   useEffect(() => {
     walletConnectedRef.current = connected
@@ -686,6 +687,7 @@ export function Home({ active = true }: { active?: boolean }) {
     () => (slippagePreset === 'custom' ? parseSlippageBps(customSlippagePercent) : slippagePresetBps(slippagePreset)),
     [slippagePreset, customSlippagePercent]
   )
+  effectiveSlippageBpsRef.current = effectiveSlippageBps
 
   useEffect(() => {
     if (connected && publicKey) {
@@ -834,7 +836,7 @@ export function Home({ active = true }: { active?: boolean }) {
                 inputMint: token.mint,
                 outputMint: SOL_MINT,
                 amount: rawAmount,
-                slippageBps: effectiveSlippageBps,
+                slippageBps: effectiveSlippageBpsRef.current,
                 signal: controller.signal,
                 cacheTtlMs: 60_000,
               })
@@ -859,7 +861,7 @@ export function Home({ active = true }: { active?: boolean }) {
                   inputMint: token.mint,
                   outputMint: USDC_MINT,
                   amount: rawAmount,
-                  slippageBps: effectiveSlippageBps,
+                  slippageBps: effectiveSlippageBpsRef.current,
                   signal: controller.signal,
                   cacheTtlMs: 60_000,
                 })
@@ -943,7 +945,6 @@ export function Home({ active = true }: { active?: boolean }) {
     publicKey,
     isSelling,
     probeTokensSignature,
-    effectiveSlippageBps,
   ])
 
   useEffect(() => {
@@ -968,6 +969,16 @@ export function Home({ active = true }: { active?: boolean }) {
   }, [tokens, hideUnverifiedTokens, tradabilityByMint, verificationFilter])
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
+
+  const tokensWithValue = useMemo(
+    () => tokens.filter(token => tokenValueUsd(token) !== null),
+    [tokens]
+  )
+
+  const sellableTokensWithValue = useMemo(
+    () => sellableTokens.filter(token => tokenValueUsd(token) !== null),
+    [sellableTokens]
+  )
 
   const valuesResolvedCount = useMemo(() => {
     return sellableTokens.filter(token => {
@@ -1238,7 +1249,7 @@ export function Home({ active = true }: { active?: boolean }) {
               inputMint: token.mint,
               outputMint: SOL_MINT,
               amount: rawAmount,
-              slippageBps: effectiveSlippageBps,
+              slippageBps: effectiveSlippageBpsRef.current,
               forceRefresh,
               signal: controller.signal,
             })
@@ -1281,7 +1292,16 @@ export function Home({ active = true }: { active?: boolean }) {
       controller.abort()
       clearTimeout(timeoutId)
     }
-  }, [connected, isSelling, selectedTokensForSell, selectedSellableCount, effectiveSlippageBps, estimateRefreshNonce])
+  }, [connected, isSelling, selectedTokensForSell, selectedSellableCount, estimateRefreshNonce])
+
+  // Debounce slippage changes to re-trigger estimation
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setEstimateRefreshNonce(prev => prev + 1)
+    }, 600)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveSlippageBps])
 
   async function fetchTokens(walletAddress: string) {
     fetchControllerRef.current?.abort()
@@ -1364,17 +1384,6 @@ export function Home({ active = true }: { active?: boolean }) {
     setSelectedMints(new Set())
   }
 
-  function autoSelectDustTokens() {
-    const threshold = Math.max(0, dustThresholdUsd)
-    const dustMints = visibleSellableTokens
-      .filter(token => {
-        const usdValue = tokenValueUsd(token)
-        return usdValue !== null && usdValue <= threshold
-      })
-      .map(token => token.mint)
-
-    setSelectedMints(new Set(dustMints))
-  }
 
   function refreshEstimate() {
     if (selectedSellableCount === 0 || sellEstimate.loading || isSelling) return
@@ -2173,7 +2182,7 @@ export function Home({ active = true }: { active?: boolean }) {
                   <div className="text-lg tabular-nums leading-none">
                     {loading || !allValuesResolved ? (
                       <span className="inline-block w-8 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
-                    ) : tokens.length}
+                    ) : tokensWithValue.length}
                   </div>
                 </div>
                 <div>
@@ -2183,7 +2192,7 @@ export function Home({ active = true }: { active?: boolean }) {
                   <div className="text-lg tabular-nums leading-none">
                     {loading || !allValuesResolved ? (
                       <span className="inline-block w-8 h-5 bg-muted-foreground/10" style={{ animation: 'shimmer 1.5s infinite linear', backgroundSize: '200% 100%', backgroundImage: 'linear-gradient(90deg, transparent 0%, hsl(var(--muted-foreground) / 0.08) 50%, transparent 100%)' }} />
-                    ) : sellableTokens.length}
+                    ) : sellableTokensWithValue.length}
                   </div>
                 </div>
                 <div>
@@ -2331,22 +2340,11 @@ export function Home({ active = true }: { active?: boolean }) {
 
                 <button
                   type="button"
-                  onClick={autoSelectDustTokens}
-                  disabled={isSelling || visibleSellableTokens.length === 0}
-                  className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
-                >
-                  auto-select
-                </button>
-
-                <div className="w-px h-4 bg-border mx-0.5" />
-
-                <button
-                  type="button"
                   onClick={selectAllSellable}
                   disabled={isSelling || visibleSellableTokens.length === 0}
                   className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
                 >
-                  all
+                  select all
                 </button>
                 <button
                   type="button"
@@ -2354,7 +2352,7 @@ export function Home({ active = true }: { active?: boolean }) {
                   disabled={isSelling || selectedMints.size === 0}
                   className="h-7 px-2.5 border border-border text-xs font-mono uppercase tracking-wider hover:bg-accent hover:border-foreground/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:border-border"
                 >
-                  clear
+                  clear all
                 </button>
 
                 <div className="flex-1" />
