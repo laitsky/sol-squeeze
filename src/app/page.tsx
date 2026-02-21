@@ -3,7 +3,8 @@ import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
 import { Connection, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js'
 import { createCloseAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token'
-import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles } from 'lucide-react'
+import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles, Download, Share2 } from 'lucide-react'
+import { useShareCardImage } from '@/lib/useShareCardImage'
 import { VariableSizeList } from 'react-window'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -235,7 +236,16 @@ function formatTimeAgo(timestamp: number, nowMs: number): string {
 function formatShareReclaimedLabel(lamportsEstimate: bigint | null): string {
   if (lamportsEstimate === null || lamportsEstimate <= BigInt(0)) return 'extra SOL'
   if (lamportsEstimate < BigInt(1_000)) return '<0.000001 SOL'
-  return `${formatLamportsAsSol(lamportsEstimate, 3)} SOL`
+
+  const lamportsPerSol = BigInt(1_000_000_000)
+  const lamportsPerMilliSol = BigInt(1_000_000)
+  const maxFractionDigits = lamportsEstimate < lamportsPerMilliSol
+    ? 9
+    : lamportsEstimate < lamportsPerSol
+      ? 6
+      : 3
+
+  return `${formatLamportsAsSol(lamportsEstimate, maxFractionDigits)} SOL`
 }
 
 function formatTokenAmount(amount: number): string {
@@ -497,6 +507,8 @@ export function Home({ active = true }: { active?: boolean }) {
   const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([])
   const [shareResultSummary, setShareResultSummary] = useState<ShareResultSummary | null>(null)
   const [shareCaptionCopied, setShareCaptionCopied] = useState(false)
+  const [isSharingOnX, setIsSharingOnX] = useState(false)
+  const { previewUrl, isGenerating, generatePreview, downloadImage, nativeShare, copyImageToClipboard, canNativeShare } = useShareCardImage()
   const [hasHydratedStorage, setHasHydratedStorage] = useState(false)
 
   const dustThresholdUsd = useMemo(() => {
@@ -1186,6 +1198,15 @@ export function Home({ active = true }: { active?: boolean }) {
   }, [shareCaption])
 
   useEffect(() => {
+    if (shareResultSummary && shareResultSummary.soldCount > 0) {
+      void generatePreview({
+        reclaimedLabel: formatShareReclaimedLabel(shareResultSummary.reclaimedLamportsEstimate ?? null),
+        soldCount: shareResultSummary.soldCount,
+      })
+    }
+  }, [shareResultSummary, generatePreview])
+
+  useEffect(() => {
     if (!connected || isSelling || selectedSellableCount === 0) {
       setSellEstimate({
         totalOutLamports: null,
@@ -1403,6 +1424,34 @@ export function Home({ active = true }: { active?: boolean }) {
       pushToast('success', 'Share caption copied.')
     } catch {
       pushToast('error', 'Unable to copy caption. Copy manually.')
+    }
+  }
+
+  async function shareOnX() {
+    if (!shareIntentUrl || isSharingOnX) return
+
+    const shareTab = window.open('about:blank', '_blank', 'noopener,noreferrer')
+    if (!shareTab) {
+      pushToast('error', 'Popup blocked. Allow popups for this site to share on X in a new tab.')
+      return
+    }
+
+    setIsSharingOnX(true)
+    try {
+      let imageCopiedToClipboard = false
+      if (previewUrl) {
+        imageCopiedToClipboard = await copyImageToClipboard()
+      }
+
+      shareTab.location.href = shareIntentUrl
+
+      if (imageCopiedToClipboard) {
+        pushToast('info', 'Opened X in a new tab. Paste image with Cmd+V / Ctrl+V.')
+      } else if (previewUrl) {
+        pushToast('info', 'Opened X in a new tab. This browser blocked image copy; use Download image.')
+      }
+    } finally {
+      setIsSharingOnX(false)
     }
   }
 
@@ -2475,13 +2524,10 @@ export function Home({ active = true }: { active?: boolean }) {
                   <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-[hsl(var(--primary))]/20 blur-2xl" />
                   <div className="pointer-events-none absolute -left-10 bottom-0 h-20 w-20 rounded-full bg-foreground/10 blur-xl" />
 
-                  <div className="relative flex flex-wrap items-center justify-between gap-2">
+                  <div className="relative flex flex-wrap items-center gap-2">
                     <div className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.22em] text-foreground/85">
                       <Sparkles className="h-3 w-3" />
                       Share Your Win
-                    </div>
-                    <div className="font-mono text-[10px] uppercase tracking-widest text-foreground/75">
-                      built for X + Solana feeds
                     </div>
                   </div>
 
@@ -2499,21 +2545,64 @@ export function Home({ active = true }: { active?: boolean }) {
                     )}
                   </div>
 
+                  {previewUrl && (
+                    <div className="relative mt-4 mx-auto w-full max-w-[420px] border border-foreground/10">
+                      <img
+                        src={previewUrl}
+                        alt="Share card preview"
+                        className="w-full h-auto"
+                        draggable={false}
+                      />
+                    </div>
+                  )}
+                  {isGenerating && (
+                    <div className="relative mt-4 flex items-center gap-2 font-mono text-[11px] text-foreground/50">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Generating image…
+                    </div>
+                  )}
+
                   <div className="relative mt-4 border border-foreground/15 bg-background/55 px-3 py-2.5 font-mono text-[11px] leading-relaxed text-foreground/88">
                     {shareCaption}
                   </div>
 
                   <div className="relative mt-3 flex flex-wrap gap-2">
-                    {shareIntentUrl && (
-                      <a
-                        href={shareIntentUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="h-8 px-3 bg-foreground text-background text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:opacity-85 transition-opacity"
+                    {canNativeShare ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void nativeShare(shareCaption)
+                        }}
+                        disabled={!previewUrl}
+                        className="h-8 px-3 bg-[hsl(var(--primary))] text-background text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:opacity-85 transition-opacity disabled:opacity-40"
                       >
-                        Share on X
+                        <Share2 className="h-3 w-3" />
+                        Share
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={downloadImage}
+                        disabled={!previewUrl}
+                        className="h-8 px-3 bg-[hsl(var(--primary))] text-background text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:opacity-85 transition-opacity disabled:opacity-40"
+                      >
+                        <Download className="h-3 w-3" />
+                        Download image
+                      </button>
+                    )}
+                    {shareIntentUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void shareOnX()
+                        }}
+                        disabled={!previewUrl || isGenerating || isSharingOnX}
+                        className="h-8 px-3 bg-foreground text-background text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:opacity-85 transition-opacity disabled:opacity-40"
+                      >
+                        {isSharingOnX ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                        {isSharingOnX ? 'Sharing...' : 'Share on X'}
                         <ExternalLink className="h-3 w-3" />
-                      </a>
+                      </button>
                     )}
                     <button
                       type="button"
