@@ -30,6 +30,9 @@ cp .env.example .env.local
 - `VITE_JUPITER_SWAP_API_URL` - Jupiter API base URL (default `https://api.jup.ag`).
 - `VITE_JUPITER_API_KEY` - Optional Jupiter API key.
 - `VITE_JUPITER_MAX_PRIORITY_FEE_LAMPORTS` - Optional per-swap max priority fee cap. Default is `0`.
+- `JUPITER_REFERRAL_FEE_BPS` - Optional Jupiter platform fee in bps (server-side). Set `0` to disable.
+- `JUPITER_REFERRAL_FEE_ACCOUNT` - Fee account public key passed to Jupiter swap requests. Required when `JUPITER_REFERRAL_FEE_BPS > 0`.
+- `SOLANA_RPC_URL` - Optional server-side RPC URL used to validate the configured fee account on-chain (falls back to `VITE_SOLANA_RPC_URL` if unset).
 
 ## Scripts
 

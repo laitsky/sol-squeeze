@@ -2,7 +2,7 @@ import dotenv from 'dotenv'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import helmet from 'helmet'
 import path from 'path'
-import { PublicKey, VersionedTransaction } from '@solana/web3.js'
+import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js'
 import { z } from 'zod'
 
 dotenv.config()
@@ -16,6 +16,12 @@ const DEFAULT_JUPITER_ALLOWED_HOSTS = new Set(['api.jup.ag', 'lite-api.jup.ag', 
 const DEFAULT_HELIUS_ALLOWED_HOSTS = new Set(['api.helius.xyz'])
 const DEFAULT_MAX_PRIORITY_FEE_LAMPORTS = 0
 const MAX_PRIORITY_FEE_LAMPORTS_CAP = 2_000_000
+const DEFAULT_JUPITER_REFERRAL_FEE_BPS = 0
+const MAX_JUPITER_REFERRAL_FEE_BPS = 10_000
+const SPL_TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+const SPL_TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
+const JUPITER_REFERRAL_PROGRAM_ID = 'REFER4ZgmyYx9c6He5XfaTMiGfdLwRnkV4RPp9t9iF3'
+const FEE_ACCOUNT_OWNER_CACHE_TTL_MS = 5 * 60_000
 const ALLOWED_OUTPUT_MINTS = new Set([SOL_MINT, USDC_MINT])
 const QUOTE_CACHE_TTL_MS = 15_000
 const QUOTE_CACHE_MAX_ENTRIES = 500
@@ -41,6 +47,7 @@ interface QuoteCacheEntry {
 
 const quoteCache = new Map<string, QuoteCacheEntry>()
 const inFlightQuoteRequests = new Map<string, Promise<JsonRecord>>()
+const feeAccountOwnerValidationCache = new Map<string, { owner: string; checkedAt: number }>()
 const rateLimitByIp = new Map<string, { count: number; resetAt: number; touchedAt: number }>()
 let lastRateLimitCleanupAt = 0
 
@@ -137,6 +144,20 @@ function parseMaxPriorityFeeLamports(rawValue: string | undefined): number {
   return Math.min(integerValue, MAX_PRIORITY_FEE_LAMPORTS_CAP)
 }
 
+function parseJupiterReferralFeeBps(rawValue: string | undefined): number {
+  if (!rawValue) return DEFAULT_JUPITER_REFERRAL_FEE_BPS
+
+  const parsed = Number(rawValue)
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_JUPITER_REFERRAL_FEE_BPS
+  }
+
+  const integerValue = Math.floor(parsed)
+  if (integerValue <= 0) return 0
+
+  return Math.min(integerValue, MAX_JUPITER_REFERRAL_FEE_BPS)
+}
+
 function getHeliusApiKey(): string | null {
   const explicitKey = getEnv('HELIUS_API_KEY')
   if (explicitKey) {
@@ -159,6 +180,10 @@ function getHeliusApiKey(): string | null {
 
 function getJupiterApiKey(): string | null {
   return getEnv('JUPITER_API_KEY') || null
+}
+
+function getSolanaRpcUrl(): string | null {
+  return getEnv('SOLANA_RPC_URL') || getEnv('VITE_SOLANA_RPC_URL') || null
 }
 
 function getClientIp(request: Request): string {
@@ -268,6 +293,26 @@ function normalizeErrorMessage(payload: unknown, fallback: string): string {
   }
 
   return fallback
+}
+
+function parsePlatformFeeBpsFromQuote(payload: JsonRecord): number | null {
+  const platformFee = payload.platformFee
+  if (!platformFee || typeof platformFee !== 'object') {
+    return null
+  }
+
+  if ('feeBps' in platformFee && typeof platformFee.feeBps === 'number' && Number.isFinite(platformFee.feeBps)) {
+    return Math.floor(platformFee.feeBps)
+  }
+
+  if ('feeBps' in platformFee && typeof platformFee.feeBps === 'string') {
+    const parsed = Number(platformFee.feeBps)
+    if (Number.isFinite(parsed)) {
+      return Math.floor(parsed)
+    }
+  }
+
+  return null
 }
 
 async function fetchJsonWithTimeout(url: string, init: RequestInit): Promise<{ response: globalThis.Response; payload: unknown }> {
@@ -417,6 +462,73 @@ const jupiterApiKey = getJupiterApiKey()
 const maxPriorityFeeLamports = parseMaxPriorityFeeLamports(
   getEnv('JUPITER_MAX_PRIORITY_FEE_LAMPORTS')
 )
+const jupiterReferralFeeBps = parseJupiterReferralFeeBps(
+  getEnv('JUPITER_REFERRAL_FEE_BPS')
+)
+const rawJupiterReferralFeeAccount = getEnv('JUPITER_REFERRAL_FEE_ACCOUNT')
+const jupiterReferralFeeAccount = rawJupiterReferralFeeAccount && isValidPublicKey(rawJupiterReferralFeeAccount)
+  ? rawJupiterReferralFeeAccount
+  : null
+const isJupiterReferralEnabled = jupiterReferralFeeBps > 0 && !!jupiterReferralFeeAccount
+const solanaRpcUrl = getSolanaRpcUrl()
+const solanaConnection = solanaRpcUrl ? new Connection(solanaRpcUrl, 'confirmed') : null
+
+if (rawJupiterReferralFeeAccount && !jupiterReferralFeeAccount) {
+  console.warn('[config] JUPITER_REFERRAL_FEE_ACCOUNT is not a valid Solana public key; referral fees disabled.')
+}
+
+if (jupiterReferralFeeBps > 0 && !jupiterReferralFeeAccount) {
+  console.warn('[config] JUPITER_REFERRAL_FEE_BPS is set but JUPITER_REFERRAL_FEE_ACCOUNT is missing or invalid; referral fees disabled.')
+}
+
+if (isJupiterReferralEnabled && !solanaConnection) {
+  console.warn('[config] Referral fee validation disabled: set SOLANA_RPC_URL (or VITE_SOLANA_RPC_URL) for on-chain fee account checks.')
+}
+
+async function validateConfiguredFeeAccountOwner(): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!isJupiterReferralEnabled || !jupiterReferralFeeAccount) {
+    return { ok: true }
+  }
+
+  if (!solanaConnection) {
+    return { ok: false, error: 'Referral fee account validation requires SOLANA_RPC_URL.' }
+  }
+
+  const cached = feeAccountOwnerValidationCache.get(jupiterReferralFeeAccount)
+  if (cached && (Date.now() - cached.checkedAt) < FEE_ACCOUNT_OWNER_CACHE_TTL_MS) {
+    const owner = cached.owner
+    const isAllowedOwner =
+      owner === SPL_TOKEN_PROGRAM_ID ||
+      owner === SPL_TOKEN_2022_PROGRAM_ID ||
+      owner === JUPITER_REFERRAL_PROGRAM_ID
+    if (isAllowedOwner) {
+      return { ok: true }
+    }
+    return { ok: false, error: `Configured fee account is not supported (owner: ${owner}).` }
+  }
+
+  try {
+    const accountInfo = await solanaConnection.getAccountInfo(new PublicKey(jupiterReferralFeeAccount))
+    if (!accountInfo) {
+      return { ok: false, error: 'Configured fee account does not exist on-chain.' }
+    }
+
+    const owner = accountInfo.owner.toBase58()
+    feeAccountOwnerValidationCache.set(jupiterReferralFeeAccount, { owner, checkedAt: Date.now() })
+
+    const isAllowedOwner =
+      owner === SPL_TOKEN_PROGRAM_ID ||
+      owner === SPL_TOKEN_2022_PROGRAM_ID ||
+      owner === JUPITER_REFERRAL_PROGRAM_ID
+    if (!isAllowedOwner) {
+      return { ok: false, error: `Configured fee account is not supported (owner: ${owner}).` }
+    }
+  } catch {
+    return { ok: false, error: 'Failed to validate configured fee account on-chain.' }
+  }
+
+  return { ok: true }
+}
 
 const app = express()
 app.set('trust proxy', parseTrustProxy(getEnv('TRUST_PROXY')))
@@ -563,7 +675,7 @@ app.get('/api/quote', async (request: Request, response: Response) => {
     return
   }
 
-  const cacheKey = `${quoteQuery.inputMint}:${quoteQuery.outputMint}:${quoteQuery.amount}:${quoteQuery.slippageBps}:${quoteQuery.restrictIntermediateTokens}`
+  const cacheKey = `${quoteQuery.inputMint}:${quoteQuery.outputMint}:${quoteQuery.amount}:${quoteQuery.slippageBps}:${quoteQuery.restrictIntermediateTokens}:${isJupiterReferralEnabled ? jupiterReferralFeeBps : 0}`
   const cached = quoteCache.get(cacheKey)
   if (cached && Date.now() - cached.timestamp < QUOTE_CACHE_TTL_MS) {
     response.json(cached.payload)
@@ -588,6 +700,9 @@ app.get('/api/quote', async (request: Request, response: Response) => {
       slippageBps: String(quoteQuery.slippageBps),
       restrictIntermediateTokens: String(quoteQuery.restrictIntermediateTokens),
     })
+    if (isJupiterReferralEnabled) {
+      params.set('platformFeeBps', String(jupiterReferralFeeBps))
+    }
 
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -611,6 +726,13 @@ app.get('/api/quote', async (request: Request, response: Response) => {
     }
 
     const safePayload = (payload && typeof payload === 'object' ? payload : {}) as JsonRecord
+    if (isJupiterReferralEnabled) {
+      const feeBpsFromQuote = parsePlatformFeeBpsFromQuote(safePayload)
+      if (feeBpsFromQuote !== jupiterReferralFeeBps) {
+        throw new Error('Quote API did not apply configured platform fee.')
+      }
+    }
+
     quoteCache.set(cacheKey, {
       payload: safePayload,
       timestamp: Date.now(),
@@ -647,6 +769,12 @@ app.post('/api/swap', async (request: Request, response: Response) => {
     return
   }
 
+  const feeAccountValidation = await validateConfiguredFeeAccountOwner()
+  if (!feeAccountValidation.ok) {
+    response.status(503).json({ error: feeAccountValidation.error })
+    return
+  }
+
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'Content-Type': 'application/json',
@@ -671,6 +799,10 @@ app.post('/api/swap', async (request: Request, response: Response) => {
         priorityLevel: 'high',
       },
     }
+  }
+
+  if (isJupiterReferralEnabled) {
+    swapBody.feeAccount = jupiterReferralFeeAccount
   }
 
   try {
@@ -730,6 +862,16 @@ app.post('/api/swap', async (request: Request, response: Response) => {
       response.status(502).json({ error: 'Swap transaction policy check failed: no instructions.' })
       return
     }
+
+    if (isJupiterReferralEnabled) {
+      const includesFeeAccount = transaction.message.staticAccountKeys
+        .some(key => key.toBase58() === jupiterReferralFeeAccount)
+      if (!includesFeeAccount) {
+        response.status(502).json({ error: 'Swap transaction policy check failed: configured fee account missing.' })
+        return
+      }
+    }
+
     response.json(parsedSwapResponse.data)
   } catch {
     response.status(502).json({ error: 'Swap request failed.' })
