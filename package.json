@@ -2,6 +2,7 @@
   "name": "sol-squeeze",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "packageManager": "bun@1.3.7",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
