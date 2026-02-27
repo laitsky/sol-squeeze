@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Sol Squeeze Logo</title>
+  <desc id="desc">Overlapping SS monogram in italic serif style</desc>
+  <rect width="1200" height="630" fill="#0a0a0a" />
+  <text
+    x="600"
+    y="370"
+    text-anchor="middle"
+    font-family="'Instrument Serif', Georgia, serif"
+    font-size="360"
+    font-style="italic"
+    font-weight="400"
+    letter-spacing="-92"
+    fill="#ffffff"
+  >
+    SS
+  </text>
+</svg>
