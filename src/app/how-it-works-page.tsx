@@ -46,7 +46,7 @@ export function HowItWorksPage() {
             <section className="border border-border/60 bg-muted/20 p-6 mt-6">
               <h2 className="font-mono text-xs uppercase tracking-[0.18em] text-foreground/80 mb-4">Fees</h2>
               <div className="space-y-2 font-mono text-xs text-muted-foreground leading-relaxed">
-                <p>Platform fee: 0.3% (30 bps) per swap.</p>
+                <p>Platform fee: 0.65% (65 bps) per swap.</p>
                 <p>The fee is included in swap routing and reflected in your quote.</p>
               </div>
             </section>
