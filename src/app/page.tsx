@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { useWalletModal } from '@solana/wallet-adapter-react-ui'
-import { Connection, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js'
+import { Connection, PublicKey, TransactionMessage, VersionedTransaction } from '@solana/web3.js'
 import { createCloseAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token'
 import { Loader2, ArrowRight, Check, Copy, ExternalLink, Sparkles, Download, Share2 } from 'lucide-react'
 import { useShareCardImage } from '@/lib/useShareCardImage'
@@ -1455,21 +1455,46 @@ export function Home({ active = true }: { active?: boolean }) {
     }
   }
 
+  async function preSimulateTransaction(
+    connection: Connection,
+    transaction: VersionedTransaction
+  ): Promise<void> {
+    const result = await connection.simulateTransaction(transaction, {
+      sigVerify: false,
+      commitment: 'confirmed',
+    })
+    if (result.value.err) {
+      throw new Error(
+        `Simulation failed: ${JSON.stringify(result.value.err)}${
+          result.value.logs ? '\nLogs: ' + result.value.logs.slice(-3).join('\n') : ''
+        }`
+      )
+    }
+  }
+
   async function executePostSwapAccountClose(
     connection: Connection,
     ownerAddress: string,
     tokenAccount: CleanupTokenAccount
   ): Promise<string> {
     const ownerPublicKey = new PublicKey(ownerAddress)
-    const transaction = new Transaction().add(
-      createCloseAccountInstruction(
-        tokenAccount.address,
-        ownerPublicKey,
-        ownerPublicKey,
-        [],
-        tokenAccount.programId
-      )
-    )
+    const { blockhash } = await connection.getLatestBlockhash('confirmed')
+    const message = new TransactionMessage({
+      payerKey: ownerPublicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        createCloseAccountInstruction(
+          tokenAccount.address,
+          ownerPublicKey,
+          ownerPublicKey,
+          [],
+          tokenAccount.programId
+        ),
+      ],
+    }).compileToV0Message()
+    const transaction = new VersionedTransaction(message)
+
+    await preSimulateTransaction(connection, transaction)
 
     return sendTransaction(transaction, connection, {
       skipPreflight: false,
@@ -1584,6 +1609,18 @@ export function Home({ active = true }: { active?: boolean }) {
       })
     }
 
+    const markSimulationFailed = (token: Token, simError: unknown) => {
+      const message = `Simulation failed for ${tokenLabel(token)}: ${errorMessage(simError)}`
+      failed += 1
+      updateSellResult(token.mint, { state: 'failed', message })
+      pushToast('error', message, {
+        label: 'Retry',
+        onClick: () => {
+          void retryToken(token.mint)
+        },
+      })
+    }
+
     setIsSelling(true)
     setActiveSellTargetCount(targetTokens.filter(isSellableToken).length)
     setCurrentRunMints(new Set(targetTokens.map(token => token.mint)))
@@ -1658,6 +1695,7 @@ export function Home({ active = true }: { active?: boolean }) {
               quoteResponse,
               userPublicKey: ownerAddress,
             })
+
             const outAmountRaw = getQuoteOutAmountRaw(quoteResponse)
 
             preparedSwaps.push({
@@ -1710,7 +1748,21 @@ export function Home({ active = true }: { active?: boolean }) {
               break
             }
 
+            const signableBatch: PreparedSwap[] = []
             for (const preparedSwap of batch) {
+              try {
+                await preSimulateTransaction(connection, preparedSwap.transaction)
+                signableBatch.push(preparedSwap)
+              } catch (simError) {
+                markSimulationFailed(preparedSwap.token, simError)
+              }
+            }
+
+            if (signableBatch.length === 0) {
+              continue
+            }
+
+            for (const preparedSwap of signableBatch) {
               updateSellResult(preparedSwap.token.mint, {
                 state: 'awaiting-signature',
                 message: `Signature batch ${batchIndex + 1}/${batches.length}.`,
@@ -1719,17 +1771,17 @@ export function Home({ active = true }: { active?: boolean }) {
 
             let signedTransactions: VersionedTransaction[]
             try {
-              const signed = await signAllTransactions(batch.map(item => item.transaction))
+              const signed = await signAllTransactions(signableBatch.map(item => item.transaction))
               signedTransactions = signed as VersionedTransaction[]
             } catch (error) {
               const message = `Signature request rejected for batch ${batchIndex + 1}.`
-              markFailedForTokens(batch.map(item => item.token), message)
+              markFailedForTokens(signableBatch.map(item => item.token), message)
               pushToast('error', message)
               continue
             }
 
-            for (let txIndex = 0; txIndex < batch.length; txIndex += 1) {
-              const preparedSwap = batch[txIndex]
+            for (let txIndex = 0; txIndex < signableBatch.length; txIndex += 1) {
+              const preparedSwap = signableBatch[txIndex]
               const signedTransaction = signedTransactions[txIndex]
 
               if (!signedTransaction) {
@@ -1793,6 +1845,13 @@ export function Home({ active = true }: { active?: boolean }) {
             }
 
             try {
+              try {
+                await preSimulateTransaction(connection, preparedSwap.transaction)
+              } catch (simError) {
+                markSimulationFailed(preparedSwap.token, simError)
+                continue
+              }
+
               updateSellResult(preparedSwap.token.mint, { state: 'awaiting-signature', message: 'Sign in wallet.' })
 
               const signature = await sendTransaction(preparedSwap.transaction, connection, {
