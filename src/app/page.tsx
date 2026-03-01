@@ -85,9 +85,14 @@ interface ShareResultSummary {
 
 interface PreparedSwap {
   token: Token
+  rawAmount: string
+  quoteResponse: Record<string, unknown>
+  outLamportsEstimate: bigint
+}
+
+interface SignableSwap extends PreparedSwap {
   transaction: VersionedTransaction
   lastValidBlockHeight: number
-  outLamportsEstimate: bigint
 }
 
 interface CleanupTokenAccount {
@@ -473,7 +478,7 @@ function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 }
 
 export function Home({ active = true }: { active?: boolean }) {
-  const { publicKey, connected, sendTransaction, signAllTransactions, wallet } = useWallet()
+  const { publicKey, connected, sendTransaction, signTransaction, signAllTransactions, wallet } = useWallet()
   const { setVisible: setWalletModalVisible } = useWalletModal()
 
   const [tokens, setTokens] = useState<Token[]>([])
@@ -1472,6 +1477,26 @@ export function Home({ active = true }: { active?: boolean }) {
     }
   }
 
+  async function submitVersionedTransaction(
+    connection: Connection,
+    transaction: VersionedTransaction
+  ): Promise<string> {
+    if (signTransaction) {
+      const signedTransaction = await signTransaction(transaction)
+      return connection.sendRawTransaction(signedTransaction.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+        preflightCommitment: 'confirmed',
+      })
+    }
+
+    return sendTransaction(transaction, connection, {
+      skipPreflight: false,
+      maxRetries: 3,
+      preflightCommitment: 'confirmed',
+    })
+  }
+
   async function executePostSwapAccountClose(
     connection: Connection,
     ownerAddress: string,
@@ -1496,11 +1521,7 @@ export function Home({ active = true }: { active?: boolean }) {
 
     await preSimulateTransaction(connection, transaction)
 
-    return sendTransaction(transaction, connection, {
-      skipPreflight: false,
-      maxRetries: 3,
-      preflightCommitment: 'confirmed',
-    })
+    return submitVersionedTransaction(connection, transaction)
   }
 
   async function executeSellRun(
@@ -1609,16 +1630,49 @@ export function Home({ active = true }: { active?: boolean }) {
       })
     }
 
-    const markSimulationFailed = (token: Token, simError: unknown) => {
-      const message = `Simulation failed for ${tokenLabel(token)}: ${errorMessage(simError)}`
-      failed += 1
-      updateSellResult(token.mint, { state: 'failed', message })
-      pushToast('error', message, {
-        label: 'Retry',
-        onClick: () => {
-          void retryToken(token.mint)
-        },
+    const refreshPreparedSwapQuote = async (preparedSwap: PreparedSwap): Promise<Record<string, unknown>> => {
+      const refreshedQuote = await getJupiterQuote({
+        inputMint: preparedSwap.token.mint,
+        outputMint: SOL_MINT,
+        amount: preparedSwap.rawAmount,
+        slippageBps: effectiveSlippageBps,
+        forceRefresh: true,
       })
+      const outAmountRaw = getQuoteOutAmountRaw(refreshedQuote)
+      preparedSwap.quoteResponse = refreshedQuote
+      preparedSwap.outLamportsEstimate = outAmountRaw ? BigInt(outAmountRaw) : BigInt(0)
+      return refreshedQuote
+    }
+
+    const prepareSwapForSigning = async (preparedSwap: PreparedSwap): Promise<SignableSwap> => {
+      let quoteResponse = preparedSwap.quoteResponse
+      let lastError: unknown = null
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt === 1) {
+          quoteResponse = await refreshPreparedSwapQuote(preparedSwap)
+        }
+
+        try {
+          const { transaction, lastValidBlockHeight } = await buildJupiterSwapTransaction({
+            quoteResponse,
+            userPublicKey: ownerAddress,
+          })
+          await preSimulateTransaction(connection, transaction)
+          preparedSwap.quoteResponse = quoteResponse
+
+          return {
+            ...preparedSwap,
+            quoteResponse,
+            transaction,
+            lastValidBlockHeight,
+          }
+        } catch (error) {
+          lastError = error
+        }
+      }
+
+      throw lastError instanceof Error ? lastError : new Error(errorMessage(lastError))
     }
 
     setIsSelling(true)
@@ -1690,39 +1744,14 @@ export function Home({ active = true }: { active?: boolean }) {
             continue
           }
 
-          try {
-            const { transaction, lastValidBlockHeight } = await buildJupiterSwapTransaction({
-              quoteResponse,
-              userPublicKey: ownerAddress,
-            })
+          const outAmountRaw = getQuoteOutAmountRaw(quoteResponse)
 
-            const outAmountRaw = getQuoteOutAmountRaw(quoteResponse)
-
-            preparedSwaps.push({
-              token,
-              transaction,
-              lastValidBlockHeight,
-              outLamportsEstimate: outAmountRaw ? BigInt(outAmountRaw) : BigInt(0),
-            })
-          } catch (error) {
-            if (hasNoRouteError(errorMessage(error))) {
-              const message = `No route found for ${tokenLabel(token)} - low liquidity.`
-              failed += 1
-              updateSellResult(token.mint, { state: 'failed', message })
-              pushToast('error', message)
-              continue
-            }
-
-            const message = `Swap build failed for ${tokenLabel(token)}: ${errorMessage(error)}`
-            failed += 1
-            updateSellResult(token.mint, { state: 'failed', message })
-            pushToast('error', message, {
-              label: 'Retry',
-              onClick: () => {
-                void retryToken(token.mint)
-              },
-            })
-          }
+          preparedSwaps.push({
+            token,
+            rawAmount,
+            quoteResponse,
+            outLamportsEstimate: outAmountRaw ? BigInt(outAmountRaw) : BigInt(0),
+          })
         } catch (error) {
           const message = swapFailureMessage(token, error)
           failed += 1
@@ -1748,13 +1777,20 @@ export function Home({ active = true }: { active?: boolean }) {
               break
             }
 
-            const signableBatch: PreparedSwap[] = []
+            const signableBatch: SignableSwap[] = []
             for (const preparedSwap of batch) {
               try {
-                await preSimulateTransaction(connection, preparedSwap.transaction)
-                signableBatch.push(preparedSwap)
-              } catch (simError) {
-                markSimulationFailed(preparedSwap.token, simError)
+                signableBatch.push(await prepareSwapForSigning(preparedSwap))
+              } catch (error) {
+                failed += 1
+                const message = swapFailureMessage(preparedSwap.token, error)
+                updateSellResult(preparedSwap.token.mint, { state: 'failed', message })
+                pushToast('error', message, {
+                  label: 'Retry',
+                  onClick: () => {
+                    void retryToken(preparedSwap.token.mint)
+                  },
+                })
               }
             }
 
@@ -1781,16 +1817,16 @@ export function Home({ active = true }: { active?: boolean }) {
             }
 
             for (let txIndex = 0; txIndex < signableBatch.length; txIndex += 1) {
-              const preparedSwap = signableBatch[txIndex]
+              const signableSwap = signableBatch[txIndex]
               const signedTransaction = signedTransactions[txIndex]
 
               if (!signedTransaction) {
                 failed += 1
-                updateSellResult(preparedSwap.token.mint, {
+                updateSellResult(signableSwap.token.mint, {
                   state: 'failed',
                   message: 'Wallet returned an invalid signed transaction.',
                 })
-                pushToast('error', `Swap failed for ${tokenLabel(preparedSwap.token)}: invalid signed transaction.`)
+                pushToast('error', `Swap failed for ${tokenLabel(signableSwap.token)}: invalid signed transaction.`)
                 continue
               }
 
@@ -1801,7 +1837,7 @@ export function Home({ active = true }: { active?: boolean }) {
                   preflightCommitment: 'confirmed',
                 })
 
-                updateSellResult(preparedSwap.token.mint, {
+                updateSellResult(signableSwap.token.mint, {
                   state: 'submitted',
                   signature,
                   message: 'Confirming...',
@@ -1810,8 +1846,8 @@ export function Home({ active = true }: { active?: boolean }) {
                 const confirmation = await connection.confirmTransaction(
                   {
                     signature,
-                    blockhash: preparedSwap.transaction.message.recentBlockhash,
-                    lastValidBlockHeight: preparedSwap.lastValidBlockHeight,
+                    blockhash: signableSwap.transaction.message.recentBlockhash,
+                    lastValidBlockHeight: signableSwap.lastValidBlockHeight,
                   },
                   'confirmed'
                 )
@@ -1820,15 +1856,15 @@ export function Home({ active = true }: { active?: boolean }) {
                   throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
                 }
 
-                await finalizeConfirmedSwap(preparedSwap, signature)
+                await finalizeConfirmedSwap(signableSwap, signature)
               } catch (error) {
                 failed += 1
-                const message = swapFailureMessage(preparedSwap.token, error)
-                updateSellResult(preparedSwap.token.mint, { state: 'failed', message })
+                const message = swapFailureMessage(signableSwap.token, error)
+                updateSellResult(signableSwap.token.mint, { state: 'failed', message })
                 pushToast('error', message, {
                   label: 'Retry',
                   onClick: () => {
-                    void retryToken(preparedSwap.token.mint)
+                    void retryToken(signableSwap.token.mint)
                   },
                 })
               }
@@ -1845,28 +1881,19 @@ export function Home({ active = true }: { active?: boolean }) {
             }
 
             try {
-              try {
-                await preSimulateTransaction(connection, preparedSwap.transaction)
-              } catch (simError) {
-                markSimulationFailed(preparedSwap.token, simError)
-                continue
-              }
+              const signableSwap = await prepareSwapForSigning(preparedSwap)
 
-              updateSellResult(preparedSwap.token.mint, { state: 'awaiting-signature', message: 'Sign in wallet.' })
+              updateSellResult(signableSwap.token.mint, { state: 'awaiting-signature', message: 'Sign in wallet.' })
 
-              const signature = await sendTransaction(preparedSwap.transaction, connection, {
-                skipPreflight: false,
-                maxRetries: 3,
-                preflightCommitment: 'confirmed',
-              })
+              const signature = await submitVersionedTransaction(connection, signableSwap.transaction)
 
-              updateSellResult(preparedSwap.token.mint, { state: 'submitted', signature, message: 'Confirming...' })
+              updateSellResult(signableSwap.token.mint, { state: 'submitted', signature, message: 'Confirming...' })
 
               const confirmation = await connection.confirmTransaction(
                 {
                   signature,
-                  blockhash: preparedSwap.transaction.message.recentBlockhash,
-                  lastValidBlockHeight: preparedSwap.lastValidBlockHeight,
+                  blockhash: signableSwap.transaction.message.recentBlockhash,
+                  lastValidBlockHeight: signableSwap.lastValidBlockHeight,
                 },
                 'confirmed'
               )
@@ -1875,7 +1902,7 @@ export function Home({ active = true }: { active?: boolean }) {
                 throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
               }
 
-              await finalizeConfirmedSwap(preparedSwap, signature)
+              await finalizeConfirmedSwap(signableSwap, signature)
             } catch (error) {
               failed += 1
               const message = swapFailureMessage(preparedSwap.token, error)
