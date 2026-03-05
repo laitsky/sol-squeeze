@@ -24,7 +24,7 @@ export default defineConfig({
           'wallet-adapters': [
             '@solana/wallet-adapter-react',
             '@solana/wallet-adapter-react-ui',
-            '@solana/wallet-adapter-wallets',
+            '@solana/wallet-adapter-ledger',
           ],
         },
       },
