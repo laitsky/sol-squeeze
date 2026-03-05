@@ -1432,33 +1432,39 @@ export function Home({ active = true }: { active?: boolean }) {
     }
   }
 
-  async function shareOnX() {
-    if (!shareIntentUrl || isSharingOnX) return
+	  async function shareOnX() {
+	    if (!shareIntentUrl || isSharingOnX) return
+	    setIsSharingOnX(true)
+	    try {
+	      // Open the intent URL directly while the click gesture is active.
+	      // Opening `about:blank` and navigating after an `await` can fail on some browsers.
+	      const shareTab = window.open(shareIntentUrl, '_blank')
+	      if (!shareTab) {
+	        pushToast('error', 'Popup blocked. Allow popups for this site to share on X in a new tab.')
+	        return
+	      }
+	      try {
+	        shareTab.opener = null
+	      } catch {
+	        // Ignore: some browsers disallow setting opener.
+	      }
 
-    const shareTab = window.open('about:blank', '_blank', 'noopener,noreferrer')
-    if (!shareTab) {
-      pushToast('error', 'Popup blocked. Allow popups for this site to share on X in a new tab.')
-      return
-    }
+	      let imageCopiedToClipboard = false
+	      if (previewUrl) {
+	        imageCopiedToClipboard = await copyImageToClipboard()
+	      }
 
-    setIsSharingOnX(true)
-    try {
-      let imageCopiedToClipboard = false
-      if (previewUrl) {
-        imageCopiedToClipboard = await copyImageToClipboard()
-      }
-
-      shareTab.location.href = shareIntentUrl
-
-      if (imageCopiedToClipboard) {
-        pushToast('info', 'Opened X in a new tab. Paste image with Cmd+V / Ctrl+V.')
-      } else if (previewUrl) {
-        pushToast('info', 'Opened X in a new tab. This browser blocked image copy; use Download image.')
-      }
-    } finally {
-      setIsSharingOnX(false)
-    }
-  }
+	      if (imageCopiedToClipboard) {
+	        pushToast('info', 'Opened X in a new tab. Paste image with Cmd+V / Ctrl+V.')
+	      } else if (previewUrl) {
+	        pushToast('info', 'Opened X in a new tab. This browser blocked image copy; use Download image.')
+	      } else {
+	        pushToast('info', 'Opened X in a new tab.')
+	      }
+	    } finally {
+	      setIsSharingOnX(false)
+	    }
+	  }
 
   async function preSimulateTransaction(
     connection: Connection,
@@ -2676,20 +2682,20 @@ export function Home({ active = true }: { active?: boolean }) {
                         Download image
                       </button>
                     )}
-                    {shareIntentUrl && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void shareOnX()
-                        }}
-                        disabled={!previewUrl || isGenerating || isSharingOnX}
-                        className="h-8 px-3 bg-foreground text-background text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:opacity-85 transition-opacity disabled:opacity-40"
-                      >
-                        {isSharingOnX ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                        {isSharingOnX ? 'Sharing...' : 'Share on X'}
-                        <ExternalLink className="h-3 w-3" />
-                      </button>
-                    )}
+	                    {shareIntentUrl && (
+	                      <button
+	                        type="button"
+	                        onClick={() => {
+	                          void shareOnX()
+	                        }}
+	                        disabled={isGenerating || isSharingOnX}
+	                        className="h-8 px-3 bg-foreground text-background text-[11px] font-mono uppercase tracking-wider inline-flex items-center gap-1.5 hover:opacity-85 transition-opacity disabled:opacity-40"
+	                      >
+	                        {isSharingOnX ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+	                        {isSharingOnX ? 'Sharing...' : 'Share on X'}
+	                        <ExternalLink className="h-3 w-3" />
+	                      </button>
+	                    )}
                     <button
                       type="button"
                       onClick={() => {
