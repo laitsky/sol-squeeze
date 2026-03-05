@@ -31,8 +31,8 @@ cp .env.example .env.local
 - `VITE_JUPITER_API_KEY` - Optional Jupiter API key.
 - `VITE_JUPITER_MAX_PRIORITY_FEE_LAMPORTS` - Optional per-swap max priority fee cap. Default is `0`.
 - `JUPITER_REFERRAL_FEE_BPS` - Optional Jupiter platform fee in bps (server-side). Set `0` to disable.
-- `JUPITER_REFERRAL_FEE_ACCOUNT` - Fee account public key passed to Jupiter swap requests. Required when `JUPITER_REFERRAL_FEE_BPS > 0`.
-- `SOLANA_RPC_URL` - Optional server-side RPC URL used to validate the configured fee account on-chain (falls back to `VITE_SOLANA_RPC_URL` if unset).
+- `JUPITER_REFERRAL_FEE_ACCOUNT` - SPL token account public key passed to Jupiter swap requests. The account mint must match each swap input or output mint; otherwise referral fees are skipped for that swap.
+- `SOLANA_RPC_URL` - Server-side RPC URL used to validate the configured fee account on-chain (falls back to `VITE_SOLANA_RPC_URL` if unset). Required for referral fee injection.
 
 ## Scripts
 

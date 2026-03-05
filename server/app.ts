@@ -20,7 +20,6 @@ const DEFAULT_JUPITER_REFERRAL_FEE_BPS = 0
 const MAX_JUPITER_REFERRAL_FEE_BPS = 10_000
 const SPL_TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
 const SPL_TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
-const JUPITER_REFERRAL_PROGRAM_ID = 'REFER4ZgmyYx9c6He5XfaTMiGfdLwRnkV4RPp9t9iF3'
 const FEE_ACCOUNT_OWNER_CACHE_TTL_MS = 5 * 60_000
 const ALLOWED_OUTPUT_MINTS = new Set([SOL_MINT, USDC_MINT])
 const QUOTE_CACHE_TTL_MS = 15_000
@@ -47,7 +46,8 @@ interface QuoteCacheEntry {
 
 const quoteCache = new Map<string, QuoteCacheEntry>()
 const inFlightQuoteRequests = new Map<string, Promise<JsonRecord>>()
-const feeAccountOwnerValidationCache = new Map<string, { owner: string; checkedAt: number }>()
+const feeAccountOwnerValidationCache = new Map<string, { owner: string; mint: string | null; checkedAt: number }>()
+const referralFeeWarningsSeen = new Set<string>()
 const rateLimitByIp = new Map<string, { count: number; resetAt: number; touchedAt: number }>()
 let lastRateLimitCleanupAt = 0
 
@@ -482,52 +482,103 @@ if (jupiterReferralFeeBps > 0 && !jupiterReferralFeeAccount) {
 }
 
 if (isJupiterReferralEnabled && !solanaConnection) {
-  console.warn('[config] Referral fee validation disabled: set SOLANA_RPC_URL (or VITE_SOLANA_RPC_URL) for on-chain fee account checks.')
+  console.warn('[config] SOLANA_RPC_URL is missing; referral fees will be skipped because fee account validation requires RPC access.')
 }
 
-async function validateConfiguredFeeAccountOwner(): Promise<{ ok: true } | { ok: false; error: string }> {
+function warnReferralFeeOnce(message: string) {
+  if (referralFeeWarningsSeen.has(message)) {
+    return
+  }
+
+  referralFeeWarningsSeen.add(message)
+  console.warn(`[referral] ${message}`)
+}
+
+function isTokenProgramOwner(owner: string): boolean {
+  return owner === SPL_TOKEN_PROGRAM_ID || owner === SPL_TOKEN_2022_PROGRAM_ID
+}
+
+function parseTokenAccountMint(data: Buffer): string | null {
+  if (data.length < 32) {
+    return null
+  }
+
+  try {
+    return new PublicKey(data.subarray(0, 32)).toBase58()
+  } catch {
+    return null
+  }
+}
+
+async function resolveConfiguredFeeAccountMint(): Promise<string | null> {
   if (!isJupiterReferralEnabled || !jupiterReferralFeeAccount) {
-    return { ok: true }
+    return null
   }
 
   if (!solanaConnection) {
-    return { ok: false, error: 'Referral fee account validation requires SOLANA_RPC_URL.' }
+    warnReferralFeeOnce('SOLANA_RPC_URL is missing; skipping referral fee injection.')
+    return null
   }
 
   const cached = feeAccountOwnerValidationCache.get(jupiterReferralFeeAccount)
   if (cached && (Date.now() - cached.checkedAt) < FEE_ACCOUNT_OWNER_CACHE_TTL_MS) {
-    const owner = cached.owner
-    const isAllowedOwner =
-      owner === SPL_TOKEN_PROGRAM_ID ||
-      owner === SPL_TOKEN_2022_PROGRAM_ID ||
-      owner === JUPITER_REFERRAL_PROGRAM_ID
-    if (isAllowedOwner) {
-      return { ok: true }
+    if (!isTokenProgramOwner(cached.owner)) {
+      warnReferralFeeOnce(`Configured fee account owner ${cached.owner} is not an SPL token program; skipping referral fee injection.`)
+      return null
     }
-    return { ok: false, error: `Configured fee account is not supported (owner: ${owner}).` }
+
+    if (!cached.mint) {
+      warnReferralFeeOnce('Configured fee account data is not a valid SPL token account; skipping referral fee injection.')
+      return null
+    }
+
+    return cached.mint
   }
 
   try {
     const accountInfo = await solanaConnection.getAccountInfo(new PublicKey(jupiterReferralFeeAccount))
     if (!accountInfo) {
-      return { ok: false, error: 'Configured fee account does not exist on-chain.' }
+      warnReferralFeeOnce('Configured fee account does not exist on-chain; skipping referral fee injection.')
+      return null
     }
 
     const owner = accountInfo.owner.toBase58()
-    feeAccountOwnerValidationCache.set(jupiterReferralFeeAccount, { owner, checkedAt: Date.now() })
+    const mint = isTokenProgramOwner(owner) ? parseTokenAccountMint(accountInfo.data) : null
+    feeAccountOwnerValidationCache.set(jupiterReferralFeeAccount, { owner, mint, checkedAt: Date.now() })
 
-    const isAllowedOwner =
-      owner === SPL_TOKEN_PROGRAM_ID ||
-      owner === SPL_TOKEN_2022_PROGRAM_ID ||
-      owner === JUPITER_REFERRAL_PROGRAM_ID
-    if (!isAllowedOwner) {
-      return { ok: false, error: `Configured fee account is not supported (owner: ${owner}).` }
+    if (!isTokenProgramOwner(owner)) {
+      warnReferralFeeOnce(`Configured fee account owner ${owner} is not an SPL token program; skipping referral fee injection.`)
+      return null
+    }
+
+    if (!mint) {
+      warnReferralFeeOnce('Configured fee account data is not a valid SPL token account; skipping referral fee injection.')
+      return null
     }
   } catch {
-    return { ok: false, error: 'Failed to validate configured fee account on-chain.' }
+    warnReferralFeeOnce('Failed to validate configured fee account on-chain; skipping referral fee injection.')
+    return null
   }
 
-  return { ok: true }
+  const resolved = feeAccountOwnerValidationCache.get(jupiterReferralFeeAccount)
+  return resolved?.mint || null
+}
+
+async function getEffectiveReferralFeeBpsForRoute(inputMint: string, outputMint: string): Promise<number> {
+  if (!isJupiterReferralEnabled || !jupiterReferralFeeAccount) {
+    return 0
+  }
+
+  const feeAccountMint = await resolveConfiguredFeeAccountMint()
+  if (!feeAccountMint) {
+    return 0
+  }
+
+  if (feeAccountMint === inputMint || feeAccountMint === outputMint) {
+    return jupiterReferralFeeBps
+  }
+
+  return 0
 }
 
 const app = express()
@@ -675,7 +726,8 @@ app.get('/api/quote', async (request: Request, response: Response) => {
     return
   }
 
-  const cacheKey = `${quoteQuery.inputMint}:${quoteQuery.outputMint}:${quoteQuery.amount}:${quoteQuery.slippageBps}:${quoteQuery.restrictIntermediateTokens}:${isJupiterReferralEnabled ? jupiterReferralFeeBps : 0}`
+  const referralFeeBps = await getEffectiveReferralFeeBpsForRoute(quoteQuery.inputMint, quoteQuery.outputMint)
+  const cacheKey = `${quoteQuery.inputMint}:${quoteQuery.outputMint}:${quoteQuery.amount}:${quoteQuery.slippageBps}:${quoteQuery.restrictIntermediateTokens}:${referralFeeBps}`
   const cached = quoteCache.get(cacheKey)
   if (cached && Date.now() - cached.timestamp < QUOTE_CACHE_TTL_MS) {
     response.json(cached.payload)
@@ -700,8 +752,8 @@ app.get('/api/quote', async (request: Request, response: Response) => {
       slippageBps: String(quoteQuery.slippageBps),
       restrictIntermediateTokens: String(quoteQuery.restrictIntermediateTokens),
     })
-    if (isJupiterReferralEnabled) {
-      params.set('platformFeeBps', String(jupiterReferralFeeBps))
+    if (referralFeeBps > 0) {
+      params.set('platformFeeBps', String(referralFeeBps))
     }
 
     const headers: Record<string, string> = {
@@ -726,9 +778,9 @@ app.get('/api/quote', async (request: Request, response: Response) => {
     }
 
     const safePayload = (payload && typeof payload === 'object' ? payload : {}) as JsonRecord
-    if (isJupiterReferralEnabled) {
+    if (referralFeeBps > 0) {
       const feeBpsFromQuote = parsePlatformFeeBpsFromQuote(safePayload)
-      if (feeBpsFromQuote !== jupiterReferralFeeBps) {
+      if (feeBpsFromQuote !== referralFeeBps) {
         throw new Error('Quote API did not apply configured platform fee.')
       }
     }
@@ -769,11 +821,7 @@ app.post('/api/swap', async (request: Request, response: Response) => {
     return
   }
 
-  const feeAccountValidation = await validateConfiguredFeeAccountOwner()
-  if (!feeAccountValidation.ok) {
-    response.status(503).json({ error: feeAccountValidation.error })
-    return
-  }
+  const referralFeeBps = await getEffectiveReferralFeeBpsForRoute(quoteResponse.inputMint, quoteResponse.outputMint)
 
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -801,7 +849,7 @@ app.post('/api/swap', async (request: Request, response: Response) => {
     }
   }
 
-  if (isJupiterReferralEnabled) {
+  if (referralFeeBps > 0 && jupiterReferralFeeAccount) {
     swapBody.feeAccount = jupiterReferralFeeAccount
   }
 
@@ -863,7 +911,7 @@ app.post('/api/swap', async (request: Request, response: Response) => {
       return
     }
 
-    if (isJupiterReferralEnabled) {
+    if (referralFeeBps > 0 && jupiterReferralFeeAccount) {
       const includesFeeAccount = transaction.message.staticAccountKeys
         .some(key => key.toBase58() === jupiterReferralFeeAccount)
       if (!includesFeeAccount) {
