@@ -136,7 +136,6 @@ const VERIFICATION_PRIORITY: Record<string, number> = {
   unverified: 4,
 }
 
-const SIGNING_BATCH_SIZE = 6
 const ESTIMATE_QUOTE_TTL_MS = 15_000
 const RECENT_ACTIVITY_STORAGE_KEY = 'sol-squeeze-recent-activity-v1'
 const DEFAULT_DUST_THRESHOLD_USD = 5
@@ -467,18 +466,8 @@ function sortTokens(tokens: Token[], sortBy: TokenSort): Token[] {
   })
 }
 
-function chunkArray<T>(items: T[], chunkSize: number): T[][] {
-  if (items.length === 0) return []
-
-  const chunks: T[][] = []
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize))
-  }
-  return chunks
-}
-
 export function Home({ active = true }: { active?: boolean }) {
-  const { publicKey, connected, sendTransaction, signTransaction, signAllTransactions, wallet } = useWallet()
+  const { publicKey, connected, sendTransaction, signTransaction, wallet } = useWallet()
   const { setVisible: setWalletModalVisible } = useWalletModal()
 
   const [tokens, setTokens] = useState<Token[]>([])
@@ -1165,13 +1154,10 @@ export function Home({ active = true }: { active?: boolean }) {
     return BigInt(selectedSellableCount) * (baseNetworkFeeLamports + maxPriorityFeeLamports)
   }, [selectedSellableCount, maxPriorityFeeLamports])
 
-  const isBatchSigningSupported = typeof signAllTransactions === 'function'
-
   const estimatedSignaturePrompts = useMemo(() => {
     if (selectedSellableCount === 0) return 0
-    if (!isBatchSigningSupported) return selectedSellableCount
-    return Math.ceil(selectedSellableCount / SIGNING_BATCH_SIZE)
-  }, [isBatchSigningSupported, selectedSellableCount])
+    return selectedSellableCount
+  }, [selectedSellableCount])
 
   const quoteAgeLabel = useMemo(
     () => formatQuoteAgeLabel(sellEstimate.lastUpdatedAt, nowMs),
@@ -1772,154 +1758,48 @@ export function Home({ active = true }: { active?: boolean }) {
       }
 
       if (!disconnectionHandled && preparedSwaps.length > 0) {
-        if (isBatchSigningSupported && signAllTransactions && preparedSwaps.length > 1) {
-          const batches = chunkArray(preparedSwaps, SIGNING_BATCH_SIZE)
+        for (let index = 0; index < preparedSwaps.length; index += 1) {
+          const preparedSwap = preparedSwaps[index]
 
-          for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-            const batch = batches[batchIndex]
-            if (!isWalletSessionValid()) {
-              const remaining = batches.slice(batchIndex).flat().map(item => item.token)
-              handleWalletDisconnection(remaining)
-              break
-            }
-
-            const signableBatch: SignableSwap[] = []
-            for (const preparedSwap of batch) {
-              try {
-                signableBatch.push(await prepareSwapForSigning(preparedSwap))
-              } catch (error) {
-                failed += 1
-                const message = swapFailureMessage(preparedSwap.token, error)
-                updateSellResult(preparedSwap.token.mint, { state: 'failed', message })
-                pushToast('error', message, {
-                  label: 'Retry',
-                  onClick: () => {
-                    void retryToken(preparedSwap.token.mint)
-                  },
-                })
-              }
-            }
-
-            if (signableBatch.length === 0) {
-              continue
-            }
-
-            for (const preparedSwap of signableBatch) {
-              updateSellResult(preparedSwap.token.mint, {
-                state: 'awaiting-signature',
-                message: `Signature batch ${batchIndex + 1}/${batches.length}.`,
-              })
-            }
-
-            let signedTransactions: VersionedTransaction[]
-            try {
-              const signed = await signAllTransactions(signableBatch.map(item => item.transaction))
-              signedTransactions = signed as VersionedTransaction[]
-            } catch (error) {
-              const message = `Signature request rejected for batch ${batchIndex + 1}.`
-              markFailedForTokens(signableBatch.map(item => item.token), message)
-              pushToast('error', message)
-              continue
-            }
-
-            for (let txIndex = 0; txIndex < signableBatch.length; txIndex += 1) {
-              const signableSwap = signableBatch[txIndex]
-              const signedTransaction = signedTransactions[txIndex]
-
-              if (!signedTransaction) {
-                failed += 1
-                updateSellResult(signableSwap.token.mint, {
-                  state: 'failed',
-                  message: 'Wallet returned an invalid signed transaction.',
-                })
-                pushToast('error', `Swap failed for ${tokenLabel(signableSwap.token)}: invalid signed transaction.`)
-                continue
-              }
-
-              try {
-                const signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
-                  skipPreflight: false,
-                  maxRetries: 3,
-                  preflightCommitment: 'confirmed',
-                })
-
-                updateSellResult(signableSwap.token.mint, {
-                  state: 'submitted',
-                  signature,
-                  message: 'Confirming...',
-                })
-
-                const confirmation = await connection.confirmTransaction(
-                  {
-                    signature,
-                    blockhash: signableSwap.transaction.message.recentBlockhash,
-                    lastValidBlockHeight: signableSwap.lastValidBlockHeight,
-                  },
-                  'confirmed'
-                )
-
-                if (confirmation.value.err) {
-                  throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
-                }
-
-                await finalizeConfirmedSwap(signableSwap, signature)
-              } catch (error) {
-                failed += 1
-                const message = swapFailureMessage(signableSwap.token, error)
-                updateSellResult(signableSwap.token.mint, { state: 'failed', message })
-                pushToast('error', message, {
-                  label: 'Retry',
-                  onClick: () => {
-                    void retryToken(signableSwap.token.mint)
-                  },
-                })
-              }
-            }
+          if (!isWalletSessionValid()) {
+            const remaining = preparedSwaps.slice(index).map(item => item.token)
+            handleWalletDisconnection(remaining)
+            break
           }
-        } else {
-          for (let index = 0; index < preparedSwaps.length; index += 1) {
-            const preparedSwap = preparedSwaps[index]
 
-            if (!isWalletSessionValid()) {
-              const remaining = preparedSwaps.slice(index).map(item => item.token)
-              handleWalletDisconnection(remaining)
-              break
+          try {
+            const signableSwap = await prepareSwapForSigning(preparedSwap)
+
+            updateSellResult(signableSwap.token.mint, { state: 'awaiting-signature', message: 'Sign in wallet.' })
+
+            const signature = await submitVersionedTransaction(connection, signableSwap.transaction)
+
+            updateSellResult(signableSwap.token.mint, { state: 'submitted', signature, message: 'Confirming...' })
+
+            const confirmation = await connection.confirmTransaction(
+              {
+                signature,
+                blockhash: signableSwap.transaction.message.recentBlockhash,
+                lastValidBlockHeight: signableSwap.lastValidBlockHeight,
+              },
+              'confirmed'
+            )
+
+            if (confirmation.value.err) {
+              throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
             }
 
-            try {
-              const signableSwap = await prepareSwapForSigning(preparedSwap)
-
-              updateSellResult(signableSwap.token.mint, { state: 'awaiting-signature', message: 'Sign in wallet.' })
-
-              const signature = await submitVersionedTransaction(connection, signableSwap.transaction)
-
-              updateSellResult(signableSwap.token.mint, { state: 'submitted', signature, message: 'Confirming...' })
-
-              const confirmation = await connection.confirmTransaction(
-                {
-                  signature,
-                  blockhash: signableSwap.transaction.message.recentBlockhash,
-                  lastValidBlockHeight: signableSwap.lastValidBlockHeight,
-                },
-                'confirmed'
-              )
-
-              if (confirmation.value.err) {
-                throw new Error(`On-chain error: ${JSON.stringify(confirmation.value.err)}`)
-              }
-
-              await finalizeConfirmedSwap(signableSwap, signature)
-            } catch (error) {
-              failed += 1
-              const message = swapFailureMessage(preparedSwap.token, error)
-              updateSellResult(preparedSwap.token.mint, { state: 'failed', message })
-              pushToast('error', message, {
-                label: 'Retry',
-                onClick: () => {
-                  void retryToken(preparedSwap.token.mint)
-                },
-              })
-            }
+            await finalizeConfirmedSwap(signableSwap, signature)
+          } catch (error) {
+            failed += 1
+            const message = swapFailureMessage(preparedSwap.token, error)
+            updateSellResult(preparedSwap.token.mint, { state: 'failed', message })
+            pushToast('error', message, {
+              label: 'Retry',
+              onClick: () => {
+                void retryToken(preparedSwap.token.mint)
+              },
+            })
           }
         }
       }
@@ -2544,9 +2424,7 @@ export function Home({ active = true }: { active?: boolean }) {
                     <div className="mt-2 text-[11px]">
                       {activeExecutionEntry
                         ? `${activeExecutionEntry.tokenLabel} ${activeExecutionEntry.state === 'awaiting-signature' ? 'awaiting signature' : activeExecutionEntry.state === 'submitted' ? 'confirming' : 'routing'}`
-                        : isBatchSigningSupported && activeSellTargetCount > 1
-                          ? 'Approve signature batches in your wallet'
-                          : 'Approve each swap in your wallet'}
+                        : 'Approve each swap in your wallet'}
                     </div>
                   </>
                 )}
