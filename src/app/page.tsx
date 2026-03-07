@@ -61,6 +61,13 @@ interface ExecutionResult {
   signature?: string
 }
 
+interface BatchExecutionStatus {
+  current: number
+  total: number
+  tokenLabel: string
+  phase: 'building' | 'awaiting-signature' | 'submitted' | 'cleanup'
+}
+
 interface SellEstimate {
   totalOutLamports: bigint | null
   quotedCount: number
@@ -499,6 +506,7 @@ export function Home({ active = true }: { active?: boolean }) {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [recentActivity, setRecentActivity] = useState<RecentActivityItem[]>([])
   const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([])
+  const [batchExecutionStatus, setBatchExecutionStatus] = useState<BatchExecutionStatus | null>(null)
   const [shareResultSummary, setShareResultSummary] = useState<ShareResultSummary | null>(null)
   const [shareCaptionCopied, setShareCaptionCopied] = useState(false)
   const [isSharingOnX, setIsSharingOnX] = useState(false)
@@ -1146,6 +1154,29 @@ export function Home({ active = true }: { active?: boolean }) {
     return null
   }, [sellResults, tokens, currentRunMints])
 
+  const activeExecutionLabel = useMemo(() => {
+    if (batchExecutionStatus) {
+      const phaseLabel = batchExecutionStatus.phase === 'awaiting-signature'
+        ? 'awaiting signature'
+        : batchExecutionStatus.phase === 'submitted'
+          ? 'confirming'
+          : batchExecutionStatus.phase === 'cleanup'
+            ? 'closing token account'
+            : 'routing'
+      return `Swap ${batchExecutionStatus.current}/${batchExecutionStatus.total}: ${batchExecutionStatus.tokenLabel} — ${phaseLabel}`
+    }
+
+    if (activeExecutionEntry) {
+      return `${activeExecutionEntry.tokenLabel} ${activeExecutionEntry.state === 'awaiting-signature' ? 'awaiting signature' : activeExecutionEntry.state === 'submitted' ? 'confirming' : 'routing'}`
+    }
+
+    if (isSelling && activeSellTargetCount > 0) {
+      return `Approve swaps one by one in your wallet (${Math.min(completedSellCount + 1, activeSellTargetCount)}/${activeSellTargetCount} next).`
+    }
+
+    return 'Approve each swap in your wallet'
+  }, [activeExecutionEntry, activeSellTargetCount, batchExecutionStatus, completedSellCount, isSelling])
+
   const maxPriorityFeeLamports = useMemo(() => BigInt(getMaxPriorityFeeLamports()), [])
 
   const estimatedFeeLamports = useMemo(() => {
@@ -1582,6 +1613,12 @@ export function Home({ active = true }: { active?: boolean }) {
         const emptyTokenAccount = await findEmptyTokenAccountForClose(connection, ownerPublicKey, mintPublicKey)
 
         if (emptyTokenAccount) {
+          setBatchExecutionStatus({
+            current: succeeded + failed + skipped,
+            total: runTargetCount,
+            tokenLabel: tokenLabel(preparedSwap.token),
+            phase: 'cleanup',
+          })
           updateSellResult(preparedSwap.token.mint, {
             state: 'awaiting-signature',
             signature,
@@ -1688,6 +1725,7 @@ export function Home({ active = true }: { active?: boolean }) {
 
       for (let index = 0; index < targetTokens.length; index += 1) {
         const token = targetTokens[index]
+        const progressPosition = Math.min(index + 1, runTargetCount)
 
         if (!isWalletSessionValid()) {
           handleWalletDisconnection(targetTokens.slice(index))
@@ -1709,6 +1747,12 @@ export function Home({ active = true }: { active?: boolean }) {
         }
 
         try {
+          setBatchExecutionStatus({
+            current: progressPosition,
+            total: runTargetCount,
+            tokenLabel: tokenLabel(token),
+            phase: 'building',
+          })
           updateSellResult(token.mint, { state: 'building', message: 'Routing...' })
 
           let quoteResponse: Record<string, unknown>
@@ -1760,6 +1804,7 @@ export function Home({ active = true }: { active?: boolean }) {
       if (!disconnectionHandled && preparedSwaps.length > 0) {
         for (let index = 0; index < preparedSwaps.length; index += 1) {
           const preparedSwap = preparedSwaps[index]
+          const progressPosition = Math.min(completedSellCount + 1, runTargetCount)
 
           if (!isWalletSessionValid()) {
             const remaining = preparedSwaps.slice(index).map(item => item.token)
@@ -1770,10 +1815,22 @@ export function Home({ active = true }: { active?: boolean }) {
           try {
             const signableSwap = await prepareSwapForSigning(preparedSwap)
 
+            setBatchExecutionStatus({
+              current: progressPosition,
+              total: runTargetCount,
+              tokenLabel: tokenLabel(signableSwap.token),
+              phase: 'awaiting-signature',
+            })
             updateSellResult(signableSwap.token.mint, { state: 'awaiting-signature', message: 'Sign in wallet.' })
 
             const signature = await submitVersionedTransaction(connection, signableSwap.transaction)
 
+            setBatchExecutionStatus({
+              current: progressPosition,
+              total: runTargetCount,
+              tokenLabel: tokenLabel(signableSwap.token),
+              phase: 'submitted',
+            })
             updateSellResult(signableSwap.token.mint, { state: 'submitted', signature, message: 'Confirming...' })
 
             const confirmation = await connection.confirmTransaction(
@@ -1842,6 +1899,7 @@ export function Home({ active = true }: { active?: boolean }) {
       setIsSelling(false)
       setActiveSellTargetCount(0)
       setCurrentRunMints(new Set())
+      setBatchExecutionStatus(null)
     }
   }
 
@@ -2421,10 +2479,11 @@ export function Home({ active = true }: { active?: boolean }) {
                         style={{ width: `${sellProgress}%` }}
                       />
                     </div>
-                    <div className="mt-2 text-[11px]">
-                      {activeExecutionEntry
-                        ? `${activeExecutionEntry.tokenLabel} ${activeExecutionEntry.state === 'awaiting-signature' ? 'awaiting signature' : activeExecutionEntry.state === 'submitted' ? 'confirming' : 'routing'}`
-                        : 'Approve each swap in your wallet'}
+                    <div className="mt-2 flex items-center justify-between gap-3 text-[11px]">
+                      <span className="min-w-0 truncate">{activeExecutionLabel}</span>
+                      <span className="shrink-0 tabular-nums text-muted-foreground">
+                        {Math.min(completedSellCount + (batchExecutionStatus ? 1 : 0), activeSellTargetCount)}/{activeSellTargetCount}
+                      </span>
                     </div>
                   </>
                 )}
