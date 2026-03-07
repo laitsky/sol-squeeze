@@ -35,6 +35,18 @@ const DEFAULT_BACKEND_BASE_URL = ''
 const DEFAULT_MAX_PRIORITY_FEE_LAMPORTS = 0
 const MAX_PRIORITY_FEE_LAMPORTS_CAP = 2_000_000
 
+function isAllowedBackendOrigin(parsed: URL): boolean {
+  if (parsed.protocol === 'https:') {
+    return true
+  }
+
+  return parsed.protocol === 'http:' && (
+    parsed.hostname === 'localhost'
+    || parsed.hostname === '127.0.0.1'
+    || parsed.hostname === '[::1]'
+  )
+}
+
 function getBackendBaseUrl(): string {
   const configured = import.meta.env.VITE_BACKEND_API_URL
   if (!configured) {
@@ -43,8 +55,8 @@ function getBackendBaseUrl(): string {
 
   try {
     const parsed = new URL(configured)
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      throw new Error('Unsupported protocol')
+    if (!isAllowedBackendOrigin(parsed)) {
+      throw new Error('Unsupported or insecure backend origin')
     }
 
     const normalizedPath = parsed.pathname.replace(/\/+$/, '')

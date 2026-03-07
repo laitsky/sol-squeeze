@@ -1449,39 +1449,32 @@ export function Home({ active = true }: { active?: boolean }) {
     }
   }
 
-	  async function shareOnX() {
-	    if (!shareIntentUrl || isSharingOnX) return
-	    setIsSharingOnX(true)
-	    try {
-	      // Open the intent URL directly while the click gesture is active.
-	      // Opening `about:blank` and navigating after an `await` can fail on some browsers.
-	      const shareTab = window.open(shareIntentUrl, '_blank')
-	      if (!shareTab) {
-	        pushToast('error', 'Popup blocked. Allow popups for this site to share on X in a new tab.')
-	        return
-	      }
-	      try {
-	        shareTab.opener = null
-	      } catch {
-	        // Ignore: some browsers disallow setting opener.
-	      }
+  async function shareOnX() {
+    if (!shareIntentUrl || isSharingOnX) return
+    setIsSharingOnX(true)
+    try {
+      const shareTab = window.open(shareIntentUrl, '_blank', 'noopener,noreferrer')
+      if (!shareTab) {
+        pushToast('error', 'Popup blocked. Allow popups for this site to share on X in a new tab.')
+        return
+      }
 
-	      let imageCopiedToClipboard = false
-	      if (previewUrl) {
-	        imageCopiedToClipboard = await copyImageToClipboard()
-	      }
+      let imageCopiedToClipboard = false
+      if (previewUrl) {
+        imageCopiedToClipboard = await copyImageToClipboard()
+      }
 
-	      if (imageCopiedToClipboard) {
-	        pushToast('info', 'Opened X in a new tab. Paste image with Cmd+V / Ctrl+V.')
-	      } else if (previewUrl) {
-	        pushToast('info', 'Opened X in a new tab. This browser blocked image copy; use Download image.')
-	      } else {
-	        pushToast('info', 'Opened X in a new tab.')
-	      }
-	    } finally {
-	      setIsSharingOnX(false)
-	    }
-	  }
+      if (imageCopiedToClipboard) {
+        pushToast('info', 'Opened X in a new tab. Paste image with Cmd+V / Ctrl+V.')
+      } else if (previewUrl) {
+        pushToast('info', 'Opened X in a new tab. This browser blocked image copy; use Download image.')
+      } else {
+        pushToast('info', 'Opened X in a new tab.')
+      }
+    } finally {
+      setIsSharingOnX(false)
+    }
+  }
 
   async function preSimulateTransaction(
     connection: Connection,

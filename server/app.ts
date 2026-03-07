@@ -34,6 +34,7 @@ const RATE_LIMIT_WINDOW_MS = 60_000
 const RATE_LIMIT_MAX_REQUESTS = 240
 const RATE_LIMIT_MAX_KEYS = 12_000
 const RATE_LIMIT_CLEANUP_INTERVAL_MS = 30_000
+const CORS_ALLOWED_ORIGIN_MAX_ENTRIES = 20
 const MAX_RAW_AMOUNT_DIGITS = 30
 const MAX_SWAP_TRANSACTION_B64_LENGTH = 24_000
 
@@ -214,6 +215,51 @@ function parseTrustProxy(value: string | undefined): boolean | number {
   }
 
   return false
+}
+
+function getConfiguredAllowedOrigins(rawValue: string | undefined): string[] {
+  if (!rawValue) {
+    return []
+  }
+
+  const origins = rawValue
+    .split(',')
+    .map(entry => entry.trim())
+    .filter(Boolean)
+    .slice(0, CORS_ALLOWED_ORIGIN_MAX_ENTRIES)
+
+  return origins.filter(origin => {
+    try {
+      const parsed = new URL(origin)
+      return parsed.protocol === 'https:' || parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
+    } catch {
+      console.warn(`[security] Ignoring invalid CORS origin: ${origin}`)
+      return false
+    }
+  })
+}
+
+function applyCorsHeaders(request: Request, response: Response): boolean {
+  const origin = request.headers.origin
+  if (!origin) {
+    return true
+  }
+
+  const allowedOrigins = getConfiguredAllowedOrigins(getEnv('ALLOWED_ORIGINS'))
+  if (allowedOrigins.length === 0) {
+    return true
+  }
+
+  if (!allowedOrigins.includes(origin)) {
+    response.status(403).json({ error: 'Origin is not allowed.' })
+    return false
+  }
+
+  response.setHeader('Access-Control-Allow-Origin', origin)
+  response.setHeader('Vary', 'Origin')
+  response.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+  response.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  return true
 }
 
 function pruneRateLimitState(now: number) {
@@ -585,8 +631,34 @@ const app = express()
 app.set('trust proxy', parseTrustProxy(getEnv('TRUST_PROXY')))
 
 app.disable('x-powered-by')
-app.use(helmet())
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'same-site' },
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      "connect-src": ["'self'", 'https://api.mainnet-beta.solana.com', 'https://*.helius.xyz'],
+      "font-src": ["'self'", 'https://fonts.gstatic.com'],
+      "img-src": ["'self'", 'data:', 'blob:', 'https:'],
+      "script-src": ["'self'"],
+      "style-src": ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+    },
+  },
+  referrerPolicy: { policy: 'no-referrer' },
+}))
 app.use(express.json({ limit: '64kb' }))
+
+app.use((request: Request, response: Response, next: NextFunction) => {
+  if (!applyCorsHeaders(request, response)) {
+    return
+  }
+
+  if (request.method === 'OPTIONS') {
+    response.status(204).end()
+    return
+  }
+
+  next()
+})
 
 app.use('/api', (request: Request, response: Response, next: NextFunction) => {
   const now = Date.now()
