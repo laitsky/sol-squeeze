@@ -298,6 +298,11 @@ function tokenValueUsd(token: Token): number | null {
   return null
 }
 
+function isWithinDustThreshold(token: Token, dustThresholdUsd: number): boolean {
+  const usdValue = tokenValueUsd(token)
+  return usdValue === null || usdValue < dustThresholdUsd
+}
+
 function hasValidTokenPrice(token: Token): boolean {
   return typeof token.price === 'number' && Number.isFinite(token.price) && token.price > 0
 }
@@ -967,6 +972,7 @@ export function Home({ active = true }: { active?: boolean }) {
             isSellableToken(token)
             && !(tradabilityByMint[token.mint] === 'untradable' && tokenValueUsd(token) === null)
             && tradabilityByMint[token.mint] !== 'untradable'
+            && isWithinDustThreshold(token, dustThresholdUsd)
             && (
               verificationFilter === 'unverified'
               || !hideUnverifiedTokens
@@ -978,7 +984,7 @@ export function Home({ active = true }: { active?: boolean }) {
       const nextSelected = new Set(Array.from(prevSelected).filter(mint => tokenMints.has(mint)))
       return nextSelected
     })
-  }, [tokens, hideUnverifiedTokens, tradabilityByMint, verificationFilter])
+  }, [tokens, hideUnverifiedTokens, tradabilityByMint, verificationFilter, dustThresholdUsd])
 
   const sellableTokens = useMemo(() => tokens.filter(isSellableToken), [tokens])
 
@@ -1035,6 +1041,10 @@ export function Home({ active = true }: { active?: boolean }) {
         return false
       }
 
+      if (!isWithinDustThreshold(token, dustThresholdUsd)) {
+        return false
+      }
+
       if (!normalizedQuery) {
         return true
       }
@@ -1049,7 +1059,7 @@ export function Home({ active = true }: { active?: boolean }) {
     })
 
     return sortTokens(filteredTokens, sortBy)
-  }, [tokens, searchQuery, verificationFilter, sortBy, hideUnverifiedTokens, hideNoValueTokens, tradabilityByMint])
+  }, [tokens, searchQuery, verificationFilter, sortBy, hideUnverifiedTokens, hideNoValueTokens, tradabilityByMint, dustThresholdUsd])
 
   const visibleSellableTokens = useMemo(
     () => visibleTokens.filter(isSellableToken),
@@ -1092,6 +1102,14 @@ export function Home({ active = true }: { active?: boolean }) {
     [sellableTokens]
   )
 
+  const overDustThresholdTokenCount = useMemo(
+    () => sellableTokens.filter(token => {
+      const usdValue = tokenValueUsd(token)
+      return usdValue !== null && usdValue >= dustThresholdUsd
+    }).length,
+    [sellableTokens, dustThresholdUsd]
+  )
+
   const tradabilityChecksInFlight = useMemo(
     () => sellableTokens.filter(token => (
       tradabilityByMint[token.mint] === 'checking' || usdQuoteStatusByMint[token.mint] === 'checking'
@@ -1109,8 +1127,12 @@ export function Home({ active = true }: { active?: boolean }) {
   }, [tokens])
 
   const selectedTokensForSell = useMemo(
-    () => tokens.filter(token => selectedMints.has(token.mint) && isSellableToken(token)),
-    [tokens, selectedMints]
+    () => tokens.filter(token => (
+      selectedMints.has(token.mint)
+      && isSellableToken(token)
+      && isWithinDustThreshold(token, dustThresholdUsd)
+    )),
+    [tokens, selectedMints, dustThresholdUsd]
   )
 
   const selectedSellableCount = selectedTokensForSell.length
@@ -2382,6 +2404,12 @@ export function Home({ active = true }: { active?: boolean }) {
                   </span>
                 )}
 
+                {overDustThresholdTokenCount > 0 && (
+                  <span className="text-muted-foreground text-[11px] hidden sm:inline">
+                    {overDustThresholdTokenCount} above dust hidden
+                  </span>
+                )}
+
                 {selectedSellableCount > 0 && !sellEstimate.loading && sellEstimate.quotedCount > 0 && (
                   <span className="text-muted-foreground text-[11px] hidden sm:inline">
                     {sellEstimate.quotedCount} quoted
@@ -2711,8 +2739,8 @@ export function Home({ active = true }: { active?: boolean }) {
               ) : (
                 <div className="py-20 flex flex-col items-center gap-3">
                   <span className="font-mono text-xs text-muted-foreground">
-                    {noValueNoRouteTokenCount > 0 || (hideUnverifiedTokens && unverifiedTokenCount > 0) || hideNoValueTokens
-                      ? 'No tokens match current filters. Try "show no-value" or "show unverified".'
+                    {noValueNoRouteTokenCount > 0 || (hideUnverifiedTokens && unverifiedTokenCount > 0) || hideNoValueTokens || overDustThresholdTokenCount > 0
+                      ? 'No tokens match current filters. Try raising the dust threshold, or using "show no-value" / "show unverified".'
                       : 'No tokens match current search/filter settings.'}
                   </span>
                 </div>
