@@ -3,9 +3,9 @@ export interface ShareCardData {
   soldCount: number
 }
 
-const W = 1080
-const H = 1440
-const PAD = 72
+const W = 1200
+const H = 630
+const PAD = 78
 
 const BG = '#1C1C1C'
 const ORANGE = 'rgb(240, 120, 0)'
@@ -33,15 +33,13 @@ export async function renderShareCardToBlob(
   ctx.fillRect(0, 0, W, H)
 
   // -- Decorative glows
-  // Orange glow (top-right)
-  const orangeGlow = ctx.createRadialGradient(W * 0.92, H * 0.05, 0, W * 0.92, H * 0.05, W * 0.72)
+  const orangeGlow = ctx.createRadialGradient(W * 0.88, H * 0.08, 0, W * 0.88, H * 0.08, W * 0.42)
   orangeGlow.addColorStop(0, 'rgba(240, 120, 0, 0.18)')
   orangeGlow.addColorStop(1, 'rgba(240, 120, 0, 0)')
   ctx.fillStyle = orangeGlow
   ctx.fillRect(0, 0, W, H)
 
-  // White glow (bottom-left)
-  const whiteGlow = ctx.createRadialGradient(-W * 0.08, H * 1.02, 0, -W * 0.08, H * 1.02, W * 0.52)
+  const whiteGlow = ctx.createRadialGradient(-W * 0.04, H * 1.04, 0, -W * 0.04, H * 1.04, W * 0.28)
   whiteGlow.addColorStop(0, 'rgba(237, 237, 237, 0.08)')
   whiteGlow.addColorStop(1, 'rgba(237, 237, 237, 0)')
   ctx.fillStyle = whiteGlow
@@ -56,54 +54,66 @@ export async function renderShareCardToBlob(
   ctx.fillStyle = ORANGE
   ctx.fillRect(0, 0, 4, H)
 
-  // -- Top utility labels
   ctx.textBaseline = 'top'
-  ctx.fillStyle = FG_MUTED
-  ctx.font = `500 17px ${FONT_MONO}`
-  ctx.fillText('SHARE YOUR WIN', PAD, 52)
 
-  // -- Branding: "Sol Squeeze" top-left
+  // -- Branding block
+  const logoBoxSize = 118
+  const logoY = 138
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.03)'
+  ctx.fillRect(PAD, logoY, logoBoxSize, logoBoxSize)
+  ctx.strokeStyle = ORANGE_BORDER
+  ctx.lineWidth = 2
+  ctx.strokeRect(PAD, logoY, logoBoxSize, logoBoxSize)
+
+  ctx.fillStyle = FG
+  ctx.font = `italic 78px ${FONT_SERIF}`
+  ctx.fillText('SS', PAD + 24, logoY + 28)
+
   ctx.font = `italic 56px ${FONT_SERIF}`
   ctx.fillStyle = FG_DIM
-  ctx.fillText('Sol Squeeze', PAD, 132)
+  ctx.fillText('Sol Squeeze', PAD + logoBoxSize + 26, 166)
+
+  // -- Kicker
+  ctx.fillStyle = ORANGE
+  ctx.font = `500 22px ${FONT_MONO}`
+  drawTrackingText(ctx, 'SELL + BURN', PAD, 300, 5)
 
   // -- Hero text: reclaimed SOL amount
-  const heroSize = fitHeroText(ctx, data.reclaimedLabel, W - PAD * 2, 138, 66)
+  const heroY = 340
+  const heroSize = fitText(ctx, data.reclaimedLabel, W - PAD * 2, 102, 60)
   ctx.font = `italic ${heroSize}px ${FONT_SERIF}`
   ctx.fillStyle = FG
-  ctx.textBaseline = 'alphabetic'
-  const heroY = 470
   ctx.fillText(data.reclaimedLabel, PAD, heroY)
 
-  // -- Subtext: "reclaimed from X dust tokens"
+  // -- Supporting line
+  const secondaryLine = 'reclaimed to SOL'
+  const secondarySize = fitText(ctx, secondaryLine, W - PAD * 2, 84, 48)
+  ctx.font = `italic ${secondarySize}px ${FONT_SERIF}`
+  ctx.fillStyle = FG
+  ctx.fillText(secondaryLine, PAD, heroY + heroSize * 0.98)
+
+  // -- Subtext
   const tokenWord = data.soldCount === 1 ? 'dust token' : 'dust tokens'
-  const subtext = `reclaimed from ${data.soldCount.toLocaleString()} ${tokenWord}`
-  ctx.font = `400 31px ${FONT_MONO}`
+  const subtext = `from ${data.soldCount.toLocaleString()} ${tokenWord}`
+  ctx.font = `400 22px ${FONT_MONO}`
   ctx.fillStyle = FG_DIM
-  ctx.fillText(subtext, PAD, heroY + 52)
+  ctx.fillText(subtext, PAD, 536)
 
   // -- Decorative separator
   ctx.fillStyle = ORANGE_BORDER
-  ctx.fillRect(PAD, heroY + 110, 170, 2)
-
-  // -- Caption line
-  const caption = `I just reclaimed ${data.reclaimedLabel} from ${data.soldCount.toLocaleString()} ${tokenWord} with Sol Squeeze.`
-  ctx.font = `400 25px ${FONT_MONO}`
-  ctx.fillStyle = FG_MUTED
-  wrapText(ctx, caption, PAD, heroY + 170, W - PAD * 2, 38)
+  ctx.fillRect(PAD, 586, 180, 2)
 
   // -- Bottom branding
-  ctx.font = `400 24px ${FONT_MONO}`
+  ctx.font = `400 18px ${FONT_MONO}`
   ctx.fillStyle = FG_MUTED
-  ctx.textBaseline = 'bottom'
   const siteLabel = 'solsqueeze.app'
   const siteLabelWidth = ctx.measureText(siteLabel).width
-  ctx.fillText(siteLabel, W - PAD - siteLabelWidth, H - PAD)
+  ctx.fillText(siteLabel, W - PAD - siteLabelWidth, H - 70)
 
   // -- Small orange dot next to site label
   ctx.fillStyle = ORANGE
   ctx.beginPath()
-  ctx.arc(W - PAD - siteLabelWidth - 20, H - PAD - 8, 4.5, 0, Math.PI * 2)
+  ctx.arc(W - PAD - siteLabelWidth - 18, H - 60, 5, 0, Math.PI * 2)
   ctx.fill()
 
   return new Promise<Blob>((resolve, reject) => {
@@ -117,35 +127,21 @@ export async function renderShareCardToBlob(
   })
 }
 
-function wrapText(
+function drawTrackingText(
   ctx: CanvasRenderingContext2D,
   text: string,
   x: number,
   y: number,
-  maxWidth: number,
-  lineHeight: number,
+  tracking: number,
 ) {
-  const words = text.split(' ')
-  let line = ''
-  let currentY = y
-
-  for (const word of words) {
-    const testLine = line ? `${line} ${word}` : word
-    const metrics = ctx.measureText(testLine)
-    if (metrics.width > maxWidth && line) {
-      ctx.fillText(line, x, currentY)
-      line = word
-      currentY += lineHeight
-    } else {
-      line = testLine
-    }
-  }
-  if (line) {
-    ctx.fillText(line, x, currentY)
+  let currentX = x
+  for (const char of text) {
+    ctx.fillText(char, currentX, y)
+    currentX += ctx.measureText(char).width + tracking
   }
 }
 
-function fitHeroText(
+function fitText(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number,
